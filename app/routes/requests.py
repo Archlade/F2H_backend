@@ -7,6 +7,8 @@ from ..services.request_service import (
 from ..models import PurchaseRequest
 from ..utils.helpers import paginate_response
 from flask_jwt_extended import get_jwt
+from ..utils.validators import clamp_page
+from ..utils.decorators import current_user_role
 
 requests_bp = Blueprint('requests', __name__)
 
@@ -15,9 +17,12 @@ requests_bp = Blueprint('requests', __name__)
 @jwt_required()
 def create_request():
     user_id = int(get_jwt_identity())
-    claims = get_jwt()
-    if claims.get('role') not in ('customer', 'admin'):
-        return jsonify({'error': 'Only customers can submit requests'}), 403
+    _, role = current_user_role()
+    # Farmers buy from each other, so anyone signed in may place a request.
+    # Buying your own listing is rejected in the service, where the product —
+    # and therefore its owner — is actually known.
+    if role not in ('customer', 'farmer', 'admin'):
+        return jsonify({'error': 'Please sign in to place an order'}), 403
 
     data = request.get_json()
     if not data:
@@ -44,15 +49,20 @@ def create_request():
 @jwt_required()
 def list_requests():
     user_id = int(get_jwt_identity())
-    claims = get_jwt()
-    role = claims.get('role')
+    _, role = current_user_role()
     status = request.args.get('status')
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 50)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=50)
 
-    if role == 'farmer':
+    # `side` picks which half of a farmer's activity to return. Farmers both
+    # sell and buy, and the two need separate screens: the actions differ
+    # (accept/reject vs cancel) and mixing them invites acting on the wrong one.
+    #   selling  — orders for their listings   (default for farmers)
+    #   buying   — orders they placed          (their My purchases screen)
+    side = request.args.get('side')
+
+    if role == 'farmer' and side != 'buying':
         reqs, total = get_requests_for_farmer(user_id, status, page, per_page)
-    elif role == 'customer':
+    elif role in ('customer', 'farmer'):
         reqs, total = get_requests_for_customer(user_id, status, page, per_page)
     elif role == 'admin':
         query = PurchaseRequest.query
@@ -71,13 +81,14 @@ def list_requests():
 @jwt_required()
 def get_request(request_id):
     user_id = int(get_jwt_identity())
-    claims = get_jwt()
+    _, role = current_user_role()
     req = PurchaseRequest.query.get_or_404(request_id)
 
-    # Access control
-    if claims.get('role') == 'customer' and req.customer_id != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    if claims.get('role') == 'farmer' and req.farmer_id != user_id:
+    # Access control by side of the order, not by account role — a farmer who
+    # placed this order is its buyer and must be able to open it. Checking
+    # `farmer_id` alone used to 403 a farmer on their own purchases.
+    from ..models.request import party_for
+    if party_for(req, user_id, role) is None:
         return jsonify({'error': 'Forbidden'}), 403
 
     return jsonify(req.to_dict()), 200
@@ -87,8 +98,7 @@ def get_request(request_id):
 @jwt_required()
 def update_status(request_id):
     user_id = int(get_jwt_identity())
-    claims = get_jwt()
-    role = claims.get('role')
+    _, role = current_user_role()
     data = request.get_json() or {}
 
     new_status = data.get('status')

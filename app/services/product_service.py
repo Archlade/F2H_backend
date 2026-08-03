@@ -89,6 +89,45 @@ def get_product_by_id(product_id: int):
     return Product.query.filter_by(id=product_id, deleted_at=None).first()
 
 
+def image_urls_from(data: dict) -> list:
+    """Pull a plain list of image URLs out of whatever the client sent.
+
+    Three shapes are in circulation and all of them have to work:
+
+        image_urls: ["https://…", …]          the documented contract (website)
+        images:     ["https://…", …]          older clients
+        images:     [{"image_url": "…", …}]   the Flutter app, which mirrors the
+                                              shape the API *returns*
+
+    The third one is why publishing a listing with photos used to fail: the
+    dict was assigned straight to ProductImage.image_url, which is a String
+    column, and the insert blew up at commit time. Normalising here means one
+    rule for create and update instead of update quietly being the only one
+    that got it right.
+
+    Precedence is on presence, not truthiness: an explicit `image_urls: []`
+    means "remove every photo" and must not fall through to `images`, or a
+    farmer could never delete the last picture on a listing.
+    """
+    raw = data.get('image_urls')
+    if raw is None:
+        raw = data.get('images')
+    if not raw:
+        return []
+
+    urls = []
+    for item in raw:
+        if isinstance(item, str):
+            url = item
+        elif isinstance(item, dict):
+            url = item.get('image_url') or item.get('url')
+        else:
+            url = None
+        if url and isinstance(url, str) and url.strip():
+            urls.append(url.strip())
+    return urls
+
+
 def create_product(farmer_id: int, data: dict):
     slug = slugify(data['name'])
     existing = Product.query.filter_by(slug=slug, farmer_id=farmer_id).first()
@@ -116,8 +155,7 @@ def create_product(farmer_id: int, data: dict):
     db.session.add(product)
     db.session.flush()
 
-    # Add images
-    for idx, url in enumerate(data.get('image_urls', [])):
+    for idx, url in enumerate(image_urls_from(data)):
         img = ProductImage(
             product_id=product.id,
             image_url=url,
@@ -141,6 +179,14 @@ def update_product(product_id: int, farmer_id: int, data: dict):
     for field in allowed:
         if field in data:
             setattr(product, field, data[field])
+
+    # Replace the image set when the client sends one
+    if 'image_urls' in data or 'images' in data:
+        # delete-orphan cascade removes the rows that are no longer listed
+        product.images = [
+            ProductImage(image_url=url, is_primary=(idx == 0), sort_order=idx)
+            for idx, url in enumerate(image_urls_from(data))
+        ]
 
     product.update_stock_status()
     db.session.commit()

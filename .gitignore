@@ -1,0 +1,36 @@
+# Secrets — never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Local databases
+*.db
+*.sqlite3
+f2h_dev.db
+
+# User uploads — served from disk, not source-controlled
+uploads/
+!uploads/.gitkeep
+
+# Migrations scratch
+instance/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

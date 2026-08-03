@@ -4,6 +4,7 @@ from ..models import User, FarmerProfile, Location
 from ..services.product_service import get_products, calculate_distance
 from ..utils.decorators import farmer_required
 from ..extensions import db
+from ..utils.validators import clamp_page
 
 farmers_bp = Blueprint('farmers', __name__)
 
@@ -47,8 +48,7 @@ def list_farmers():
         except Exception:
             pass
 
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 50)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=50)
     search = request.args.get('q', '').strip()
 
     query = (User.query

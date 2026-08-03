@@ -14,11 +14,17 @@ def get_chat_by_id(chat_id: int, user_id: int):
 
 
 def get_user_chats(user_id: int, role: str):
-    if role == 'customer':
-        return Chat.query.filter_by(customer_id=user_id).order_by(Chat.last_message_at.desc()).all()
-    elif role == 'farmer':
-        return Chat.query.filter_by(farmer_id=user_id).order_by(Chat.last_message_at.desc()).all()
-    return []
+    """Every chat the user is a party to, whichever side they are on.
+
+    Selecting by role used to mean a farmer saw only the chats attached to
+    their sales; the conversations about produce they had *bought* were
+    invisible even though they were half of them.
+    """
+    from ..extensions import db
+    return (Chat.query
+            .filter(db.or_(Chat.customer_id == user_id, Chat.farmer_id == user_id))
+            .order_by(Chat.last_message_at.desc())
+            .all())
 
 
 def get_messages(chat_id: int, user_id: int, page=1, per_page=50):

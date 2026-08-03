@@ -6,8 +6,11 @@ class Chat(db.Model):
     __tablename__ = 'chats'
 
     id = db.Column(db.Integer, primary_key=True)
+    # A chat belongs to either a purchase request or a family pack order.
     request_id = db.Column(db.Integer, db.ForeignKey('purchase_requests.id', ondelete='CASCADE'),
-                           nullable=False, unique=True)
+                           nullable=True, unique=True)
+    family_pack_order_id = db.Column(db.Integer, db.ForeignKey('family_pack_orders.id', ondelete='CASCADE'),
+                                     nullable=True, unique=True)
     customer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     farmer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     last_message_at = db.Column(db.DateTime)
@@ -15,6 +18,8 @@ class Chat(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     request = db.relationship('PurchaseRequest', back_populates='chat')
+    family_pack_order = db.relationship('FamilyPackOrder', foreign_keys=[family_pack_order_id],
+                                        back_populates='chat')
     customer = db.relationship('User', foreign_keys=[customer_id])
     farmer = db.relationship('User', foreign_keys=[farmer_id])
     messages = db.relationship('Message', back_populates='chat', cascade='all, delete-orphan',
@@ -25,6 +30,7 @@ class Chat(db.Model):
         data = {
             'id': self.id,
             'request_id': self.request_id,
+            'family_pack_order_id': self.family_pack_order_id,
             'customer_id': self.customer_id,
             'farmer_id': self.farmer_id,
             'last_message_at': self.last_message_at.isoformat() if self.last_message_at else None,

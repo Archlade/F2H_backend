@@ -32,7 +32,7 @@ class Product(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     deleted_at = db.Column(db.DateTime)
 
-    farmer = db.relationship('User', foreign_keys=[farmer_id], back_populates=None)
+    farmer = db.relationship('User', foreign_keys=[farmer_id])
     category = db.relationship('Category', back_populates='products')
     images = db.relationship('ProductImage', back_populates='product', cascade='all, delete-orphan',
                              order_by='ProductImage.sort_order')

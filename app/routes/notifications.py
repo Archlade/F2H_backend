@@ -4,6 +4,7 @@ from ..services.notification_service import (
     get_notifications, mark_notification_read, mark_all_read, get_unread_count
 )
 from ..utils.helpers import paginate_response
+from ..utils.validators import clamp_page
 
 notifications_bp = Blueprint('notifications', __name__)
 
@@ -12,8 +13,7 @@ notifications_bp = Blueprint('notifications', __name__)
 @jwt_required()
 def list_notifications():
     user_id = int(get_jwt_identity())
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 50)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=50)
     unread_only = request.args.get('unread_only', type=lambda x: x == 'true')
 
     items, total = get_notifications(user_id, unread_only, page, per_page)

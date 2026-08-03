@@ -2,11 +2,14 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from ..utils.decorators import admin_required
 from ..utils.helpers import paginate_response, log_audit
-from ..models import (User, FarmerProfile, Product, PurchaseRequest, Review, Report,
-                       FeaturedFarmer, FeaturedProduct, HomepageSection, Announcement, Category)
+from ..models import (User, Role, FarmerProfile, Product, PurchaseRequest, Review, Report,
+                       FeaturedFarmer, FeaturedProduct, HomepageSection, Announcement, Category,
+                       FamilyPack, FamilyPackOrder)
+
 from ..extensions import db
 from datetime import datetime
 from sqlalchemy import func
+from ..utils.validators import clamp_page
 
 admin_bp = Blueprint('admin', __name__)
 
@@ -20,18 +23,54 @@ def _get_admin_id():
 @jwt_required()
 @admin_required
 def dashboard():
+    """Platform totals for the admin landing page.
+
+    Every order figure here counts both kinds of order. The previous version
+    summed only PurchaseRequest, so a platform selling mostly weekly baskets
+    reported a fraction of its real revenue and completed orders.
+    """
     total_users = User.query.filter_by(deleted_at=None).count()
-    total_farmers = (User.query.join(FarmerProfile, User.id == FarmerProfile.user_id)
-                     .filter(User.deleted_at.is_(None)).count())
+
+    # Count farmers by their current role, not by "has a profile row" — a
+    # profile outlives a role change, so the old join over-counted.
+    total_farmers = (User.query.join(Role, User.role_id == Role.id)
+                     .filter(Role.name == 'farmer', User.deleted_at.is_(None)).count())
     total_products = Product.query.filter(Product.deleted_at.is_(None)).count()
-    active_requests = PurchaseRequest.query.filter(
-        PurchaseRequest.status.in_(['pending', 'chat_active', 'confirmed', 'preparing'])
-    ).count()
-    completed_orders = PurchaseRequest.query.filter_by(status='completed').count()
-    pending_requests = PurchaseRequest.query.filter_by(status='pending').count()
+
+    # In-flight work, across both order tables. Both share one status enum, so
+    # one list covers them. The old version stopped at 'preparing' and so lost
+    # sight of anything already packed or on the road.
+    open_statuses = ['pending', 'admin_review', 'accepted', 'chat_active',
+                     'confirmed', 'preparing', 'ready_for_pickup', 'out_for_delivery']
+    active_requests = (
+        PurchaseRequest.query.filter(PurchaseRequest.status.in_(open_statuses)).count()
+        + FamilyPackOrder.query.filter(FamilyPackOrder.status.in_(open_statuses)).count()
+    )
+    completed_orders = (
+        PurchaseRequest.query.filter_by(status='completed').count()
+        + FamilyPackOrder.query.filter_by(status='completed').count()
+    )
+    pending_requests = (
+        PurchaseRequest.query.filter_by(status='pending').count()
+        + FamilyPackOrder.query.filter_by(status='pending').count()
+    )
     pending_reports = Report.query.filter_by(status='pending').count()
 
-    revenue = db.session.query(func.sum(PurchaseRequest.total_price)).filter_by(status='completed').scalar() or 0
+    # Queues an admin is expected to act on, so the dashboard can link to them.
+    pending_farmers = (FarmerProfile.query.join(User, User.id == FarmerProfile.user_id)
+                       .filter(FarmerProfile.is_verified.is_(False),
+                               User.deleted_at.is_(None)).count())
+    pending_products = Product.query.filter(Product.is_approved.is_(False),
+                                            Product.deleted_at.is_(None)).count()
+    pending_packs = FamilyPack.query.filter(FamilyPack.is_approved.is_(False),
+                                            FamilyPack.deleted_at.is_(None)).count()
+    pending_reviews = Review.query.filter(Review.is_approved.is_(False)).count()
+
+    # total_price is already the amount charged, so discounts are accounted for.
+    request_revenue = db.session.query(func.sum(PurchaseRequest.total_price)).filter(
+        PurchaseRequest.status == 'completed').scalar() or 0
+    pack_revenue = db.session.query(func.sum(FamilyPackOrder.total_price)).filter(
+        FamilyPackOrder.status == 'completed').scalar() or 0
 
     return jsonify({
         'total_users': total_users,
@@ -41,7 +80,14 @@ def dashboard():
         'completed_orders': completed_orders,
         'pending_requests': pending_requests,
         'pending_reports': pending_reports,
-        'total_revenue': float(revenue),
+        'pending_farmers': pending_farmers,
+        'pending_products': pending_products,
+        'pending_packs': pending_packs,
+        'pending_reviews': pending_reviews,
+        'total_revenue': float(request_revenue) + float(pack_revenue),
+        # Split out so the analytics page can show where the money comes from.
+        'product_revenue': float(request_revenue),
+        'basket_revenue': float(pack_revenue),
     }), 200
 
 
@@ -50,8 +96,7 @@ def dashboard():
 @jwt_required()
 @admin_required
 def list_users():
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 100)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
     search = request.args.get('q', '').strip()
     role = request.args.get('role')
 
@@ -63,7 +108,6 @@ def list_users():
             User.last_name.ilike(f'%{search}%'),
         ))
     if role:
-        from ..models import Role
         r = Role.query.filter_by(name=role).first()
         if r:
             query = query.filter_by(role_id=r.id)
@@ -103,8 +147,7 @@ def toggle_user(user_id):
 @jwt_required()
 @admin_required
 def list_farmers():
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 100)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
     search = request.args.get('q', '').strip()
 
     query = (User.query
@@ -157,8 +200,7 @@ def suspend_farmer(farmer_id):
 @jwt_required()
 @admin_required
 def list_products():
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 100)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
     search = request.args.get('q', '').strip()
 
     query = Product.query.filter(Product.deleted_at.is_(None))
@@ -307,8 +349,7 @@ def create_category():
 @jwt_required()
 @admin_required
 def list_reports():
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 100)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
     status = request.args.get('status', 'pending')
 
     query = Report.query
@@ -339,8 +380,7 @@ def update_report(report_id):
 @jwt_required()
 @admin_required
 def list_all_requests():
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 100)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
     status = request.args.get('status')
 
     query = PurchaseRequest.query
@@ -357,8 +397,7 @@ def list_all_requests():
 @admin_required
 def get_audit_logs():
     from ..models import AdminAuditLog
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 100)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
 
     total = AdminAuditLog.query.count()
     logs = (AdminAuditLog.query
@@ -402,8 +441,7 @@ def list_announcements():
 @jwt_required()
 @admin_required
 def list_reviews():
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 100)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
     is_flagged = request.args.get('flagged', type=lambda x: x == 'true')
 
     query = Review.query
@@ -437,12 +475,19 @@ def analytics():
     # Users over last 30 days
     thirty_ago = datetime.utcnow() - timedelta(days=30)
     new_users = User.query.filter(User.created_at >= thirty_ago, User.deleted_at.is_(None)).count()
-    new_requests = PurchaseRequest.query.filter(PurchaseRequest.created_at >= thirty_ago).count()
+    new_requests = (
+        PurchaseRequest.query.filter(PurchaseRequest.created_at >= thirty_ago).count()
+        + FamilyPackOrder.query.filter(FamilyPackOrder.created_at >= thirty_ago).count()
+    )
 
-    revenue = db.session.query(func.sum(PurchaseRequest.total_price)).filter(
+    # Both order tables, so this agrees with total_revenue on the dashboard.
+    revenue = (db.session.query(func.sum(PurchaseRequest.total_price)).filter(
         PurchaseRequest.status == 'completed',
         PurchaseRequest.created_at >= thirty_ago
-    ).scalar() or 0
+    ).scalar() or 0) + (db.session.query(func.sum(FamilyPackOrder.total_price)).filter(
+        FamilyPackOrder.status == 'completed',
+        FamilyPackOrder.created_at >= thirty_ago
+    ).scalar() or 0)
 
     # Top categories
     from ..models import Category
@@ -461,3 +506,132 @@ def analytics():
         'revenue_30d': float(revenue),
         'top_categories': [{'name': n, 'count': c} for n, c in top_categories],
     }), 200
+
+
+# ── Family Packs Admin ─────────────────────────────────────────────────────────
+@admin_bp.route('/family-packs', methods=['GET'])
+@jwt_required()
+@admin_required
+def list_admin_family_packs():
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
+    search = request.args.get('q', '').strip()
+
+    query = FamilyPack.query.filter(FamilyPack.deleted_at.is_(None))
+    if search:
+        query = query.filter(FamilyPack.name.ilike(f'%{search}%'))
+
+    total = query.count()
+    packs = query.order_by(FamilyPack.created_at.desc()).offset((page-1)*per_page).limit(per_page).all()
+    return jsonify(paginate_response([p.to_dict() for p in packs], total, page, per_page)), 200
+
+
+@admin_bp.route('/family-packs/<int:pack_id>/approve', methods=['PATCH'])
+@jwt_required()
+@admin_required
+def approve_family_pack(pack_id):
+    admin_id = _get_admin_id()
+    pack = FamilyPack.query.get_or_404(pack_id)
+    pack.is_approved = not pack.is_approved
+    log_audit(admin_id, 'approve_family_pack', 'family_pack', pack_id)
+    db.session.commit()
+    return jsonify({'is_approved': pack.is_approved}), 200
+
+
+@admin_bp.route('/family-pack-orders', methods=['GET'])
+@jwt_required()
+@admin_required
+def list_admin_family_pack_orders():
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
+    status = request.args.get('status')
+
+    query = FamilyPackOrder.query
+    if status:
+        query = query.filter_by(status=status)
+    total = query.count()
+    orders = query.order_by(FamilyPackOrder.created_at.desc()).offset((page-1)*per_page).limit(per_page).all()
+    return jsonify(paginate_response([o.to_dict() for o in orders], total, page, per_page)), 200
+
+
+
+# ── Coupons ────────────────────────────────────────────────────────────────────
+@admin_bp.route('/coupons', methods=['GET'])
+@jwt_required()
+@admin_required
+def list_coupons():
+    """Every coupon, filterable by status — this is the used/unused report."""
+    from ..services import coupon_service
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
+    status = request.args.get('status')
+    search = request.args.get('q', '').strip()
+
+    items, total = coupon_service.list_coupons(status=status, search=search,
+                                               page=page, per_page=per_page)
+    payload = paginate_response([c.to_dict(include_admin=True) for c in items],
+                                total, page, per_page)
+    # Counts travel with the first page so the header can render without a
+    # second round trip.
+    payload['summary'] = coupon_service.summary()
+    return jsonify(payload), 200
+
+
+@admin_bp.route('/coupons', methods=['POST'])
+@jwt_required()
+@admin_required
+def create_coupon():
+    from ..services import coupon_service
+    admin_id = _get_admin_id()
+    try:
+        coupon = coupon_service.create_coupon(admin_id, request.get_json() or {})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    log_audit(admin_id, 'create_coupon', 'coupon', coupon.id, None,
+              {'code': coupon.code, 'label': coupon.label})
+    db.session.commit()
+    return jsonify(coupon.to_dict(include_admin=True)), 201
+
+
+@admin_bp.route('/coupons/<int:coupon_id>', methods=['PUT'])
+@jwt_required()
+@admin_required
+def update_coupon(coupon_id):
+    from ..services import coupon_service
+    admin_id = _get_admin_id()
+    try:
+        coupon = coupon_service.update_coupon(coupon_id, request.get_json() or {})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    log_audit(admin_id, 'update_coupon', 'coupon', coupon.id, None,
+              {'code': coupon.code, 'label': coupon.label})
+    db.session.commit()
+    return jsonify(coupon.to_dict(include_admin=True)), 200
+
+
+@admin_bp.route('/coupons/<int:coupon_id>', methods=['DELETE'])
+@jwt_required()
+@admin_required
+def delete_coupon(coupon_id):
+    from ..services import coupon_service
+    admin_id = _get_admin_id()
+    try:
+        coupon_service.delete_coupon(coupon_id)
+    except ValueError as e:
+        # Used coupons are history, not clutter — the caller is told to
+        # deactivate instead.
+        return jsonify({'error': str(e)}), 400
+
+    log_audit(admin_id, 'delete_coupon', 'coupon', coupon_id)
+    db.session.commit()
+    return jsonify({'message': 'Coupon deleted'}), 200
+
+
+@admin_bp.route('/coupon-redemptions', methods=['GET'])
+@jwt_required()
+@admin_required
+def list_coupon_redemptions():
+    """Who redeemed what, and against which order."""
+    from ..services import coupon_service
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
+    items, total = coupon_service.redemptions(page=page, per_page=per_page)
+    return jsonify(paginate_response([r.to_dict() for r in items], total, page, per_page)), 200

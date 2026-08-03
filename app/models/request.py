@@ -1,6 +1,60 @@
 from ..extensions import db
 from datetime import datetime
 
+# Which party is allowed to move an order into a given state. Without this a
+# buyer could accept and confirm their own order — including the stock
+# deduction that confirming performs on the seller's inventory.
+#
+# Keyed on the party's side of *this order*, not on their account role. Farmers
+# buy from each other, so the same account is the seller on one row and the
+# buyer on the next; deciding from the account role alone would hand a farmer
+# seller powers over an order they merely placed.
+PARTY_TRANSITIONS = {
+    'buyer': {'cancelled'},
+    'seller': {'accepted', 'rejected', 'chat_active', 'confirmed', 'preparing',
+               'ready_for_pickup', 'out_for_delivery', 'completed', 'cancelled'},
+    'admin': {'accepted', 'rejected', 'admin_review', 'chat_active', 'confirmed',
+              'preparing', 'ready_for_pickup', 'out_for_delivery', 'completed', 'cancelled'},
+}
+
+# The old names, so nothing that still speaks in account roles breaks.
+ROLE_TRANSITIONS = {
+    'customer': PARTY_TRANSITIONS['buyer'],
+    'farmer': PARTY_TRANSITIONS['seller'],
+    'admin': PARTY_TRANSITIONS['admin'],
+}
+
+_ROLE_ALIASES = {'customer': 'buyer', 'farmer': 'seller'}
+
+
+def party_for(order, actor_id, actor_role):
+    """Which side of this order the actor is on: 'buyer', 'seller', 'admin' or None.
+
+    An admin is an admin everywhere. Otherwise the answer comes from the row:
+    whoever placed it is the buyer and whoever is selling is the seller,
+    regardless of what kind of account either of them holds.
+
+    Returns None for someone with no stake in the order, which callers treat
+    as "not authorised".
+    """
+    if actor_role == 'admin':
+        return 'admin'
+    if getattr(order, 'customer_id', None) == actor_id:
+        return 'buyer'
+    if getattr(order, 'farmer_id', None) == actor_id:
+        return 'seller'
+    return None
+
+
+def party_may_set(party, new_status):
+    return new_status in PARTY_TRANSITIONS.get(party, set())
+
+
+def role_may_set(actor_role, new_status):
+    """Deprecated: prefer party_may_set, which is correct when a farmer buys."""
+    return party_may_set(_ROLE_ALIASES.get(actor_role, actor_role), new_status)
+
+
 VALID_TRANSITIONS = {
     'pending': ['accepted', 'rejected', 'cancelled', 'admin_review'],
     'admin_review': ['accepted', 'rejected', 'cancelled'],
@@ -25,7 +79,13 @@ class PurchaseRequest(db.Model):
     product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=False)
     quantity = db.Column(db.Numeric(10, 3), nullable=False)
     unit_price = db.Column(db.Numeric(10, 2), nullable=False)
+    # total_price is what the customer actually pays, so every existing revenue
+    # sum keeps working without coupon awareness. subtotal is the pre-discount
+    # figure kept alongside it.
     total_price = db.Column(db.Numeric(10, 2), nullable=False)
+    subtotal = db.Column(db.Numeric(10, 2))
+    discount_amount = db.Column(db.Numeric(10, 2), nullable=False, default=0)
+    coupon_id = db.Column(db.Integer, db.ForeignKey('coupons.id', ondelete='SET NULL'))
     purchase_mode = db.Column(db.Enum('delivery', 'pickup'), nullable=False)
     status = db.Column(
         db.Enum('pending', 'admin_review', 'accepted', 'rejected', 'chat_active',
@@ -44,6 +104,7 @@ class PurchaseRequest(db.Model):
 
     customer = db.relationship('User', foreign_keys=[customer_id])
     farmer = db.relationship('User', foreign_keys=[farmer_id])
+    coupon = db.relationship('Coupon', foreign_keys=[coupon_id])
     product = db.relationship('Product', back_populates='requests')
     delivery_address = db.relationship('Address', foreign_keys=[delivery_address_id])
     canceller = db.relationship('User', foreign_keys=[cancelled_by])
@@ -63,6 +124,15 @@ class PurchaseRequest(db.Model):
             'quantity': float(self.quantity),
             'unit_price': float(self.unit_price),
             'total_price': float(self.total_price),
+            # Rows created before coupons existed have no subtotal; for those
+            # the subtotal simply is the total.
+            'subtotal': float(self.subtotal) if self.subtotal is not None else float(self.total_price),
+            'discount_amount': float(self.discount_amount or 0),
+            'coupon': {
+                'id': self.coupon.id,
+                'code': self.coupon.code,
+                'label': self.coupon.label,
+            } if self.coupon else None,
             'purchase_mode': self.purchase_mode,
             'status': self.status,
             'delivery_address_id': self.delivery_address_id,
@@ -106,7 +176,10 @@ class RequestStatusHistory(db.Model):
     __tablename__ = 'request_status_history'
 
     id = db.Column(db.Integer, primary_key=True)
-    request_id = db.Column(db.Integer, db.ForeignKey('purchase_requests.id', ondelete='CASCADE'), nullable=False)
+    # A history row belongs to either a purchase request or a family pack order.
+    request_id = db.Column(db.Integer, db.ForeignKey('purchase_requests.id', ondelete='CASCADE'), nullable=True)
+    family_pack_order_id = db.Column(db.Integer, db.ForeignKey('family_pack_orders.id', ondelete='CASCADE'),
+                                     nullable=True)
     from_status = db.Column(db.String(50))
     to_status = db.Column(db.String(50), nullable=False)
     changed_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)

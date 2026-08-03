@@ -1,8 +1,9 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from ..models import Review, Product, FarmerProfile
+from ..models import Review, Product, FarmerProfile, PurchaseRequest, FamilyPackOrder
 from ..extensions import db
 from sqlalchemy import func
+from ..utils.validators import clamp_page
 
 reviews_bp = Blueprint('reviews', __name__)
 
@@ -15,18 +16,62 @@ def create_review():
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
-    rating = data.get('rating')
-    if not rating or not (1 <= int(rating) <= 5):
+    try:
+        rating = int(data.get('rating'))
+    except (TypeError, ValueError):
         return jsonify({'error': 'Rating must be 1-5'}), 400
+    if not (1 <= rating <= 5):
+        return jsonify({'error': 'Rating must be 1-5'}), 400
+
+    product_id = data.get('product_id')
+    farmer_id = data.get('farmer_id')
+    if not product_id and not farmer_id:
+        return jsonify({'error': 'A product or a farmer is required'}), 400
+
+    # Only people who actually bought can review, otherwise ratings can be
+    # moved at will by anyone holding an account.
+    completed = ['completed']
+    purchase_q = PurchaseRequest.query.filter(
+        PurchaseRequest.customer_id == user_id,
+        PurchaseRequest.status.in_(completed),
+    )
+    if product_id:
+        purchase_q = purchase_q.filter(PurchaseRequest.product_id == product_id)
+    else:
+        purchase_q = purchase_q.filter(PurchaseRequest.farmer_id == farmer_id)
+    purchase = purchase_q.order_by(PurchaseRequest.created_at.desc()).first()
+
+    if not purchase:
+        pack_q = FamilyPackOrder.query.filter(
+            FamilyPackOrder.customer_id == user_id,
+            FamilyPackOrder.status.in_(completed),
+        )
+        if farmer_id:
+            pack_q = pack_q.filter(FamilyPackOrder.farmer_id == farmer_id)
+        if not pack_q.first():
+            return jsonify({
+                'error': 'You can only review after a completed order',
+                'code': 'NO_PURCHASE',
+            }), 403
+
+    # One review per customer per product/farm.
+    duplicate = Review.query.filter_by(
+        reviewer_id=user_id,
+        product_id=product_id or None,
+        farmer_id=farmer_id or None,
+    ).first()
+    if duplicate:
+        return jsonify({'error': 'You have already reviewed this'}), 409
 
     review = Review(
         reviewer_id=user_id,
-        product_id=data.get('product_id'),
-        farmer_id=data.get('farmer_id'),
-        request_id=data.get('request_id'),
-        rating=int(rating),
-        title=data.get('title', ''),
-        content=data.get('content', ''),
+        product_id=product_id,
+        farmer_id=farmer_id,
+        # Derived from the verified purchase, never taken from the request body.
+        request_id=purchase.id if purchase else None,
+        rating=rating,
+        title=(data.get('title') or '')[:255],
+        content=(data.get('content') or '')[:5000],
     )
     db.session.add(review)
     db.session.flush()
@@ -61,8 +106,7 @@ def _update_ratings(review):
 def list_reviews():
     product_id = request.args.get('product_id', type=int)
     farmer_id = request.args.get('farmer_id', type=int)
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 10, type=int), 50)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=50)
 
     query = Review.query.filter_by(is_approved=True)
     if product_id:

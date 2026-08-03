@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from ..services.chat_service import get_chat_by_id, get_user_chats, get_messages, send_message
+from ..utils.decorators import current_user_role
 
 chat_bp = Blueprint('chat', __name__)
 
@@ -9,7 +10,7 @@ chat_bp = Blueprint('chat', __name__)
 @jwt_required()
 def list_chats():
     user_id = int(get_jwt_identity())
-    role = get_jwt().get('role')
+    _, role = current_user_role()
     chats = get_user_chats(user_id, role)
     return jsonify([c.to_dict(current_user_id=user_id) for c in chats]), 200
 

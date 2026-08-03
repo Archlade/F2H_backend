@@ -1,12 +1,14 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
+from ..extensions import db
 from ..services.product_service import (
     get_products, get_product_by_id, create_product,
     update_product, delete_product, apply_discount, remove_discount, track_view
 )
-from ..models import Location
-from ..utils.decorators import farmer_required
+from ..models import Location, Category
+from ..utils.decorators import farmer_required, current_user_role
 from ..utils.helpers import paginate_response
+from ..utils.validators import clamp_page
 
 products_bp = Blueprint('products', __name__)
 
@@ -16,6 +18,58 @@ def _get_customer_location(user_id):
     if not loc:
         loc = Location.query.filter_by(user_id=user_id, is_primary=True, is_active=True).first()
     return loc
+
+
+# Mirrors the products.unit column. A value outside this set reaches MySQL as an
+# invalid ENUM and fails at commit, so it is caught here with a readable message.
+VALID_UNITS = ('kg', 'gram', 'litre', 'ml', 'piece', 'bundle', 'dozen', 'box')
+
+
+def _listing_problem(data):
+    """Return a human-readable problem with a listing payload, or None.
+
+    Checking here rather than letting the database complain means the farmer
+    gets 'Price must be a number greater than zero' instead of a MySQL type
+    error, and it keeps a bad request from ever opening a transaction.
+    """
+    if not str(data.get('name') or '').strip():
+        return 'Product name is required'
+
+    category_id = data.get('category_id')
+    if category_id in (None, ''):
+        return 'Choose a category'
+    try:
+        category_id = int(category_id)
+    except (TypeError, ValueError):
+        return 'Choose a category'
+    if not Category.query.get(category_id):
+        return 'That category no longer exists'
+
+    try:
+        price = float(data.get('price'))
+    except (TypeError, ValueError):
+        return 'Price must be a number'
+    if price <= 0:
+        return 'Price must be greater than zero'
+
+    unit = data.get('unit') or 'kg'
+    if unit not in VALID_UNITS:
+        return f"'{unit}' is not a unit we support"
+
+    # Optional, but if present they must be numbers — an empty text field
+    # arrives as '' and would otherwise fail deep inside the insert.
+    for field, label in (('available_quantity', 'Available quantity'),
+                         ('min_quantity', 'Minimum quantity'),
+                         ('low_stock_threshold', 'Low stock threshold')):
+        if data.get(field) in (None, ''):
+            continue
+        try:
+            if float(data[field]) < 0:
+                return f'{label} cannot be negative'
+        except (TypeError, ValueError):
+            return f'{label} must be a number'
+
+    return None
 
 
 @products_bp.route('', methods=['GET'])
@@ -54,8 +108,7 @@ def list_products():
         'sort': request.args.get('sort', 'newest'),
     }
 
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 50)
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=50)
 
     results, total = get_products(filters, customer_lat, customer_lon, page, per_page)
     items = [r['product'].to_dict(distance=r['distance']) for r in results]
@@ -91,16 +144,23 @@ def create():
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
-    required = ['name', 'category_id', 'price', 'unit']
-    for f in required:
-        if f not in data:
-            return jsonify({'error': f'{f} is required'}), 400
+    problem = _listing_problem(data)
+    if problem:
+        return jsonify({'error': problem}), 400
 
     try:
         product = create_product(user_id, data)
         return jsonify(product.to_dict()), 201
-    except Exception as e:
-        return jsonify({'error': str(e)}), 400
+    except Exception:
+        # A half-applied insert leaves the session dirty, and SQLAlchemy will
+        # then reject every later statement on this connection — so one bad
+        # listing would break unrelated requests until the worker recycled.
+        db.session.rollback()
+        current_app.logger.exception('Failed to create a listing for user %s', user_id)
+        # The raw driver message used to be handed straight to the farmer,
+        # which is both unreadable and a description of our schema.
+        return jsonify({'error': 'Could not publish this listing. '
+                                 'Please check the details and try again.'}), 400
 
 
 @products_bp.route('/<int:product_id>', methods=['PUT'])
@@ -109,10 +169,47 @@ def create():
 def update(product_id):
     user_id = int(get_jwt_identity())
     data = request.get_json()
-    product = update_product(product_id, user_id, data)
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    # A PUT may be a partial edit — the inline stock control on the products
+    # screen sends available_quantity alone — so only validate what was sent.
+    problem = _listing_problem({**_existing_defaults(product_id, user_id), **data})
+    if problem:
+        return jsonify({'error': problem}), 400
+
+    try:
+        product = update_product(product_id, user_id, data)
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception('Failed to update listing %s', product_id)
+        return jsonify({'error': 'Could not save this listing. '
+                                 'Please check the details and try again.'}), 400
+
     if not product:
         return jsonify({'error': 'Product not found or not authorized'}), 404
     return jsonify(product.to_dict()), 200
+
+
+def _existing_defaults(product_id, farmer_id):
+    """The stored values a partial update is allowed to inherit.
+
+    Without this, validating a one-field PATCH-style PUT would reject it for
+    missing a name it was never trying to change.
+    """
+    from ..models import Product
+    product = Product.query.filter_by(
+        id=product_id, farmer_id=farmer_id, deleted_at=None).first()
+    if not product:
+        # Let update_product own the 404; give validation something complete
+        # so it doesn't fail first with a confusing message.
+        return {'name': 'x', 'category_id': 1, 'price': 1, 'unit': 'kg'}
+    return {
+        'name': product.name,
+        'category_id': product.category_id,
+        'price': float(product.price),
+        'unit': product.unit,
+    }
 
 
 @products_bp.route('/<int:product_id>', methods=['DELETE'])
@@ -120,10 +217,10 @@ def update(product_id):
 @farmer_required
 def delete(product_id):
     user_id = int(get_jwt_identity())
-    claims = get_jwt()
+    _, role = current_user_role()
     # Admin can delete any
-    farmer_id = user_id if claims.get('role') == 'farmer' else None
-    if claims.get('role') == 'admin':
+    farmer_id = user_id if role == 'farmer' else None
+    if role == 'admin':
         from ..models import Product
         p = Product.query.get(product_id)
         if p:

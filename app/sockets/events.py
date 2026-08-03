@@ -23,9 +23,18 @@ def get_user_from_token():
 @socketio.on('connect')
 def on_connect():
     user_id, role = get_user_from_token()
-    if user_id:
-        join_room(f"user_{user_id}")
-        emit('connected', {'user_id': user_id})
+    if not user_id:
+        # Returning False rejects the handshake instead of leaving an
+        # unauthenticated socket connected.
+        return False
+
+    from ..models import User
+    user = User.query.get(user_id)
+    if not user or not user.is_active or user.deleted_at:
+        return False
+
+    join_room(f"user_{user_id}")
+    emit('connected', {'user_id': user_id})
 
 
 @socketio.on('disconnect')

@@ -3,7 +3,8 @@ import math
 from datetime import datetime
 from flask_jwt_extended import create_access_token
 from ..extensions import db
-from ..models import User, Role, FarmerProfile
+from ..models import User, Role, FarmerProfile, PasswordResetToken
+from ..models.password_reset import hash_token
 from ..utils.helpers import log_audit
 
 
@@ -61,6 +62,52 @@ def login_user(email: str, password: str):
     return user, token
 
 
+def become_farmer(user_id: int, data: dict):
+    """Turn an existing customer account into a farmer account.
+
+    Upgrading in place rather than making them register again keeps their order
+    history, addresses, favourites and chats intact — a customer who starts
+    selling is the same person, not a second account.
+
+    The role is re-read from the database on every request (see
+    `current_user_role`), so the change takes effect immediately even though
+    any already-issued JWT still carries the old role claim.
+    """
+    user = User.query.get(user_id)
+    if not user:
+        raise ValueError('Account not found')
+
+    if user.role_name == 'farmer':
+        raise ValueError('This account already sells on F2H')
+    if user.role_name == 'admin':
+        # An admin trading produce would muddle moderation with selling.
+        raise ValueError('Admin accounts cannot be converted to farm accounts')
+
+    farm_name = (data.get('farm_name') or '').strip()
+    if not farm_name:
+        raise ValueError('Farm name is required')
+
+    farmer_role = Role.query.filter_by(name='farmer').first()
+    if not farmer_role:
+        raise ValueError('The farmer role is not configured')
+
+    # A profile can already exist if an earlier upgrade half-completed.
+    profile = FarmerProfile.query.filter_by(user_id=user.id).first()
+    if profile is None:
+        profile = FarmerProfile(user_id=user.id, farm_name=farm_name)
+        db.session.add(profile)
+    else:
+        profile.farm_name = farm_name
+
+    profile.bio = (data.get('bio') or '').strip()
+    profile.farm_description = (data.get('farm_description') or '').strip()
+    profile.farming_type = (data.get('farming_type') or '').strip()
+
+    user.role_id = farmer_role.id
+    db.session.commit()
+    return user
+
+
 def get_user_by_id(user_id: int):
     return User.query.get(user_id)
 
@@ -80,5 +127,59 @@ def change_password(user_id: int, old_password: str, new_password: str):
     if not verify_password(old_password, user.password_hash):
         raise ValueError('Current password is incorrect')
     user.password_hash = hash_password(new_password)
+    db.session.commit()
+    return user
+
+
+# ─── Password reset ──────────────────────────────────────────────────────────
+
+def create_password_reset(email: str, ip_address: str = None):
+    """Issue a reset token for the address, or return (None, None) if no active
+    account matches. Callers must respond identically either way — a differing
+    response turns this endpoint into an account-enumeration oracle."""
+    user = User.query.filter_by(email=(email or '').lower().strip(),
+                                deleted_at=None).first()
+    if not user or not user.is_active:
+        return None, None
+
+    # One live token per account: requesting a new link invalidates the old one.
+    PasswordResetToken.query.filter_by(user_id=user.id, used_at=None).update(
+        {'used_at': datetime.utcnow()})
+
+    row, raw_token = PasswordResetToken.issue(user.id, ip_address)
+    db.session.add(row)
+    db.session.commit()
+    return user, raw_token
+
+
+def get_valid_reset_token(raw_token: str):
+    """Return the token row if it exists, is unused and hasn't expired."""
+    if not raw_token:
+        return None
+    row = PasswordResetToken.query.filter_by(token_hash=hash_token(raw_token)).first()
+    if not row or not row.is_usable:
+        return None
+    user = User.query.filter_by(id=row.user_id, deleted_at=None).first()
+    if not user or not user.is_active:
+        return None
+    return row
+
+
+def reset_password_with_token(raw_token: str, new_password: str):
+    row = get_valid_reset_token(raw_token)
+    if not row:
+        raise ValueError('This reset link is invalid or has expired. Please request a new one.')
+
+    user = User.query.get(row.user_id)
+    user.password_hash = hash_password(new_password)
+    row.used_at = datetime.utcnow()
+
+    # Burn every other outstanding token for this account — if someone else
+    # requested a reset too, their link should stop working now.
+    PasswordResetToken.query.filter(
+        PasswordResetToken.user_id == user.id,
+        PasswordResetToken.used_at.is_(None),
+    ).update({'used_at': datetime.utcnow()})
+
     db.session.commit()
     return user

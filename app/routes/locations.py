@@ -87,28 +87,43 @@ def add_address():
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
-    required = ['address_line1', 'city', 'state', 'postal_code']
-    for f in required:
-        if not data.get(f):
-            return jsonify({'error': f'{f} is required'}), 400
+    required = {
+        'address_line1': 'Address line 1',
+        'city': 'City',
+        'state': 'State',
+        'postal_code': 'PIN / postal code',
+    }
+    for field, label in required.items():
+        if not str(data.get(field) or '').strip():
+            return jsonify({'error': f'{label} is required'}), 400
 
-    if data.get('is_default'):
+    # A user's first address becomes the default automatically — otherwise the
+    # account can end up with saved addresses but nothing marked for checkout.
+    is_default = bool(data.get('is_default'))
+    if not is_default and not Address.query.filter_by(user_id=user_id).first():
+        is_default = True
+    if is_default:
         Address.query.filter_by(user_id=user_id).update({'is_default': False})
+
+    def clean(field, default=None):
+        value = data.get(field)
+        value = value.strip() if isinstance(value, str) else value
+        return value or default
 
     addr = Address(
         user_id=user_id,
-        label=data.get('label'),
-        recipient_name=data.get('recipient_name'),
-        phone=data.get('phone'),
-        address_line1=data['address_line1'],
-        address_line2=data.get('address_line2'),
-        city=data['city'],
-        state=data['state'],
-        postal_code=data['postal_code'],
-        country=data.get('country', 'India'),
+        label=clean('label'),
+        recipient_name=clean('recipient_name'),
+        phone=clean('phone'),
+        address_line1=clean('address_line1'),
+        address_line2=clean('address_line2'),
+        city=clean('city'),
+        state=clean('state'),
+        postal_code=clean('postal_code'),
+        country=clean('country', 'India'),
         latitude=data.get('latitude'),
         longitude=data.get('longitude'),
-        is_default=data.get('is_default', False),
+        is_default=is_default,
     )
     db.session.add(addr)
     db.session.commit()
@@ -120,12 +135,26 @@ def add_address():
 def update_address(addr_id):
     user_id = int(get_jwt_identity())
     addr = Address.query.filter_by(id=addr_id, user_id=user_id).first_or_404()
-    data = request.get_json()
+    data = request.get_json() or {}
+
+    # NOT NULL in the schema — an edit must not be able to blank these out.
+    for field, label in (('address_line1', 'Address line 1'), ('city', 'City'),
+                         ('state', 'State'), ('postal_code', 'PIN / postal code')):
+        if field in data and not str(data.get(field) or '').strip():
+            return jsonify({'error': f'{label} is required'}), 400
+
+    # Only one address can be the default, so clear the others first.
+    if data.get('is_default'):
+        Address.query.filter(Address.user_id == user_id,
+                             Address.id != addr.id).update({'is_default': False})
+
     allowed = ['label', 'recipient_name', 'phone', 'address_line1', 'address_line2',
-               'city', 'state', 'postal_code', 'latitude', 'longitude', 'is_default']
+               'city', 'state', 'postal_code', 'country', 'latitude', 'longitude',
+               'is_default']
     for field in allowed:
         if field in data:
-            setattr(addr, field, data[field])
+            value = data[field]
+            setattr(addr, field, value.strip() if isinstance(value, str) else value)
     db.session.commit()
     return jsonify(addr.to_dict()), 200
 

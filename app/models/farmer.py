@@ -27,7 +27,11 @@ class FarmerProfile(db.Model):
 
     user = db.relationship('User', foreign_keys=[user_id], back_populates='farmer_profile')
     verifier = db.relationship('User', foreign_keys=[verified_by])
-    products = db.relationship('Product', foreign_keys='Product.farmer_id', back_populates='farmer')
+    # products.farmer_id points at users.id, not farmer_profiles.id, so this is
+    # joined manually on user_id and kept read-only.
+    products = db.relationship('Product',
+                               primaryjoin='foreign(Product.farmer_id) == FarmerProfile.user_id',
+                               viewonly=True)
     farm_location = db.relationship('Location',
                                     primaryjoin="and_(Location.user_id==FarmerProfile.user_id, Location.location_type=='farm')",
                                     foreign_keys='Location.user_id',

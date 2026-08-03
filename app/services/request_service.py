@@ -11,6 +11,13 @@ def create_purchase_request(customer_id: int, data: dict):
     if not product or not product.is_active or product.deleted_at:
         raise ValueError('Product not available')
 
+    # Farmers buy from each other, so the buyer may well own listings of their
+    # own — but not this one. Selling to yourself would inflate your own sales
+    # figures, move stock between your own hands, and spend a single-use coupon
+    # on a transaction that never happened.
+    if product.farmer_id == customer_id:
+        raise ValueError('This is your own listing')
+
     if product.stock_status == 'out_of_stock':
         raise ValueError('Product is out of stock')
 
@@ -30,8 +37,23 @@ def create_purchase_request(customer_id: int, data: dict):
     if existing:
         raise ValueError('You already have an active request for this product')
 
+    # An address ID is attacker-controlled, and the address is echoed back in the
+    # response — so it has to belong to the customer placing the request.
+    address_id = data.get('delivery_address_id')
+    if address_id:
+        from ..models import Address
+        if not Address.query.filter_by(id=address_id, user_id=customer_id).first():
+            raise ValueError('That delivery address does not belong to you')
+
     unit_price = float(product.effective_price)
-    total = round(unit_price * qty, 2)
+    subtotal = round(unit_price * qty, 2)
+
+    # Resolved before anything is created, so an invalid code fails the whole
+    # request rather than leaving an order at the wrong price. The discount is
+    # recomputed here from the server's own prices — the client's preview is
+    # for display only and is never trusted.
+    from .coupon_service import apply_to_total, redeem
+    coupon, discount, total = apply_to_total(data.get('coupon_code'), subtotal)
 
     req = PurchaseRequest(
         customer_id=customer_id,
@@ -39,7 +61,10 @@ def create_purchase_request(customer_id: int, data: dict):
         product_id=data['product_id'],
         quantity=qty,
         unit_price=unit_price,
+        subtotal=subtotal,
+        discount_amount=discount,
         total_price=total,
+        coupon_id=coupon.id if coupon else None,
         purchase_mode=data['purchase_mode'],
         delivery_address_id=data.get('delivery_address_id'),
         delivery_notes=data.get('delivery_notes', ''),
@@ -48,6 +73,11 @@ def create_purchase_request(customer_id: int, data: dict):
     )
     db.session.add(req)
     db.session.flush()
+
+    # Claimed inside the same transaction as the order, so the two land
+    # together: if the commit below fails, the code stays available.
+    if coupon:
+        redeem(coupon, customer_id, subtotal, discount, request_id=req.id)
 
     _add_status_history(req.id, None, 'pending', customer_id)
     db.session.commit()
@@ -73,11 +103,20 @@ def update_request_status(request_id: int, actor_id: int, actor_role: str, new_s
     req = PurchaseRequest.query.get_or_404(request_id)
     data = data or {}
 
-    # Authorization
-    if actor_role == 'customer' and req.customer_id != actor_id:
+    # Authorization — the actor must be a party to this request, and the status
+    # must be one their side of it is allowed to set.
+    #
+    # Decided from the row, not the account role: a farmer buying from another
+    # farmer is the buyer here and may only cancel, even though their account
+    # can accept and confirm orders on the listings they sell.
+    from ..models.request import party_for, party_may_set
+    party = party_for(req, actor_id, actor_role)
+    if party is None:
         raise PermissionError('Not authorized')
-    if actor_role == 'farmer' and req.farmer_id != actor_id:
-        raise PermissionError('Not authorized')
+
+    if not party_may_set(party, new_status):
+        noun = {'buyer': 'buyer', 'seller': 'seller'}.get(party, actor_role)
+        raise PermissionError(f"The {noun} cannot set an order to '{new_status}'")
 
     if not req.can_transition_to(new_status):
         raise ValueError(f"Cannot transition from '{req.status}' to '{new_status}'")
