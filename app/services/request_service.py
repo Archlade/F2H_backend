@@ -3,6 +3,8 @@ from ..extensions import db
 from ..models import PurchaseRequest, RequestStatusHistory, Chat, Notification
 from ..models.product import Product
 from .notification_service import create_notification
+from . import order_money
+from . import stock_service as stock
 from ..extensions import socketio
 
 
@@ -91,6 +93,11 @@ def create_purchase_request(customer_id: int, data: dict):
         body=f"You have a new purchase request for {product.name}",
         data={'request_id': req.id, 'product_id': product.id},
     )
+    # The order above is already committed, so this commit is the notification's
+    # own. Without it the row is discarded when the session is torn down at the
+    # end of the request — the farmer never sees the order in their list, and
+    # the push that now rides on the same commit never goes out either.
+    db.session.commit()
 
     # Real-time notification
     socketio.emit('new_notification', {'type': 'new_request', 'request_id': req.id},
@@ -100,7 +107,19 @@ def create_purchase_request(customer_id: int, data: dict):
 
 
 def update_request_status(request_id: int, actor_id: int, actor_role: str, new_status: str, data: dict = None):
-    req = PurchaseRequest.query.get_or_404(request_id)
+    # Locked for the length of this transition. Two status changes racing on
+    # the same order — a farmer tapping "Completed" while a customer taps
+    # "Cancel" — would otherwise both read status='confirmed', both pass the
+    # transition check, and one would credit the farmer while the other
+    # refunded the customer: the platform pays out a share on an order it just
+    # gave the money back for. With the lock the second transition waits, then
+    # re-reads the committed status and the state machine rejects the now-
+    # illegal move.
+    from ..utils.locking import lock_row
+    req = lock_row(PurchaseRequest, request_id)
+    if req is None:
+        from flask import abort
+        abort(404)
     data = data or {}
 
     # Authorization — the actor must be a party to this request, and the status
@@ -109,7 +128,8 @@ def update_request_status(request_id: int, actor_id: int, actor_role: str, new_s
     # Decided from the row, not the account role: a farmer buying from another
     # farmer is the buyer here and may only cancel, even though their account
     # can accept and confirm orders on the listings they sell.
-    from ..models.request import party_for, party_may_set
+    from ..models.request import (buyer_may_cancel, cancellation_refused_reason,
+                                  party_for, party_may_set)
     party = party_for(req, actor_id, actor_role)
     if party is None:
         raise PermissionError('Not authorized')
@@ -118,8 +138,47 @@ def update_request_status(request_id: int, actor_id: int, actor_role: str, new_s
         noun = {'buyer': 'buyer', 'seller': 'seller'}.get(party, actor_role)
         raise PermissionError(f"The {noun} cannot set an order to '{new_status}'")
 
+    # The buyer's cancellation window closes when the seller confirms. Enforced
+    # here rather than left to the app, because the app is what *promises* this
+    # at checkout — and a promise only the client keeps is one a modified client
+    # does not. The seller and an admin are unaffected.
+    if new_status == 'cancelled' and party == 'buyer' and not buyer_may_cancel(req):
+        raise PermissionError(cancellation_refused_reason(req))
+
     if not req.can_transition_to(new_status):
         raise ValueError(f"Cannot transition from '{req.status}' to '{new_status}'")
+
+    # An order is not closed out before its cash is recorded.
+    #
+    # Checked here rather than trusted to the UI, because the UI is not what
+    # stops a farmer from tapping "Mark complete" on an uncollected order — and
+    # completing one credits their balance with a share of money nobody ever
+    # took, which the platform then pays out for real.
+    if order_money.payment_blocks(req, new_status):
+        raise ValueError(order_money.payment_block_reason(req, new_status))
+
+    # Stock moves here, before anything else in this transition is written.
+    #
+    # Confirming is the moment the farmer promises the goods, so it is the
+    # moment they come off the listing. Placing a request does not reserve
+    # anything — which means two customers can both ask for 3kg of a 5kg
+    # listing, and the farmer confirming the second one is refused with the
+    # real remaining figure rather than quietly overselling.
+    #
+    # Done first so that an InsufficientStock aborts the whole transition: no
+    # status change, no history row, no notification about an order that was
+    # never actually confirmed.
+    order_money.settle(req, new_status, f'order #{req.id}')
+
+    if new_status == 'confirmed' and not req.stock_committed and req.product:
+        stock.commit(req.product, req.quantity)
+        req.stock_committed = True
+    elif new_status == 'cancelled' and req.stock_committed and req.product:
+        # Only a *confirmed* order has stock out on it. Cancelling from pending
+        # or chat_active has nothing to give back, which is exactly what the
+        # flag records — 'cancelled' is reachable from both sides of confirm.
+        stock.restore(req.product, req.quantity)
+        req.stock_committed = False
 
     old_status = req.status
     req.status = new_status

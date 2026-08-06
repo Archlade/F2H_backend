@@ -22,6 +22,18 @@ class FarmerProfile(db.Model):
     rating_avg = db.Column(db.Numeric(3, 2), default=0.00)
     rating_count = db.Column(db.Integer, default=0)
     total_sales = db.Column(db.Integer, default=0)
+
+    # Where redemptions are sent. UPI covers almost every Indian farmer and is
+    # one field instead of three; bank details are the fallback.
+    #
+    # Note this is real account data: it belongs behind the farmer's own auth
+    # only, is never returned by any public farmer endpoint, and is shown to
+    # admins with the account number masked to its last four digits.
+    payout_method = db.Column(db.String(10), default='upi')
+    payout_upi_id = db.Column(db.String(255))
+    payout_account_name = db.Column(db.String(200))
+    payout_account_number = db.Column(db.String(50))
+    payout_ifsc = db.Column(db.String(20))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

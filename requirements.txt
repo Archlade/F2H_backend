@@ -17,3 +17,10 @@ email-validator==2.2.0
 eventlet==0.40.1
 geopy==2.4.1
 python-slugify==8.0.4
+# Push notifications (FCM HTTP v1). Optional at runtime — the app logs and
+# carries on if it is missing — but required for a phone to be notified while
+# the app is closed.
+firebase-admin==7.5.0
+
+# Online payments. Optional at runtime — the app boots and every other feature
+# works without it — but required to take money.

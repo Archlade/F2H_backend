@@ -5,19 +5,61 @@ from flask import request
 
 
 def get_user_from_token():
-    """Extract user ID from cookie or auth header."""
+    """The user behind this socket, or (None, None).
+
+    `decode_token` checks the signature and the expiry — it does **not** know
+    anything about revocation. So this repeats the one revocation rule the HTTP
+    side enforces in the JWT loader: a token minted before the account's
+    password last changed is dead.
+
+    Without that, the whole point of "resetting my password signs everyone
+    else out" leaked straight past the socket layer. An intruder's HTTP calls
+    would start failing while their socket carried on delivering the victim's
+    order notifications in real time — quieter than a live session, and
+    invisible to the person who thought they had locked the account.
+    """
     try:
         token = request.cookies.get('access_token_cookie')
         if not token:
             auth = request.headers.get('Authorization', '')
             if auth.startswith('Bearer '):
                 token = auth[7:]
-        if token:
-            data = decode_token(token)
-            return int(data.get('sub')), data.get('role')
+        if not token:
+            return None, None
+
+        data = decode_token(token)
+        user_id = int(data.get('sub'))
+
+        if _token_revoked(user_id, data.get('iat')):
+            return None, None
+        return user_id, data.get('role')
     except Exception:
         pass
     return None, None
+
+
+def _token_revoked(user_id, issued_at):
+    """True when this token predates the account's last password change.
+
+    Mirrors `_token_predates_password_change` in app/__init__.py, including the
+    microsecond truncation: `iat` is whole seconds while `password_changed_at`
+    is not, so without it the token handed to someone who just reset their own
+    password is refused about half the time.
+    """
+    from datetime import datetime, timezone
+
+    from ..models import User
+
+    if issued_at is None:
+        return False                      # nothing to compare; the checks below still apply
+
+    user = User.query.get(user_id)
+    changed_at = getattr(user, 'password_changed_at', None) if user else None
+    if changed_at is None:
+        return False
+
+    issued = datetime.fromtimestamp(issued_at, tz=timezone.utc).replace(tzinfo=None)
+    return issued < changed_at.replace(microsecond=0)
 
 
 @socketio.on('connect')

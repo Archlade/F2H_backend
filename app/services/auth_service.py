@@ -127,8 +127,35 @@ def change_password(user_id: int, old_password: str, new_password: str):
     if not verify_password(old_password, user.password_hash):
         raise ValueError('Current password is incorrect')
     user.password_hash = hash_password(new_password)
+    # Signs every other session out — see _invalidate_sessions. The route
+    # re-issues a cookie for the caller straight afterwards, so the person who
+    # changed their own password stays where they are.
+    _invalidate_sessions(user)
     db.session.commit()
     return user
+
+
+def _invalidate_sessions(user, drop_devices=True):
+    """Cut off every token and device already attached to this account.
+
+    Called whenever the password changes, which is the moment someone is
+    saying "I no longer trust who has access". Two things have to go:
+
+    * **Tokens.** `password_changed_at` is checked by the JWT loader on every
+      request, so an access token minted before now stops working immediately
+      and the 30-day refresh token cannot be exchanged either.
+    * **Push registrations.** Otherwise the intruder's phone keeps receiving
+      notifications about the victim's orders — the account is locked but the
+      leak continues, which is worse for being invisible.
+
+    Not committed here; the caller owns the transaction so the new password and
+    the eviction land together or not at all.
+    """
+    user.password_changed_at = datetime.utcnow()
+
+    if drop_devices:
+        from ..models import DeviceToken
+        DeviceToken.query.filter_by(user_id=user.id).delete(synchronize_session=False)
 
 
 # ─── Password reset ──────────────────────────────────────────────────────────
@@ -173,6 +200,12 @@ def reset_password_with_token(raw_token: str, new_password: str):
     user = User.query.get(row.user_id)
     user.password_hash = hash_password(new_password)
     row.used_at = datetime.utcnow()
+
+    # The reason this endpoint exists is that somebody may have lost control of
+    # the account, so every session and every registered phone goes with the
+    # old password. The caller is signed back in with a fresh token immediately
+    # afterwards, and their device re-registers on the next launch.
+    _invalidate_sessions(user)
 
     # Burn every other outstanding token for this account — if someone else
     # requested a reset too, their link should stop working now.

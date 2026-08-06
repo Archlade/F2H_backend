@@ -112,6 +112,16 @@ class FamilyPackOrder(db.Model):
     rejection_reason = db.Column(db.Text)
     cancellation_reason = db.Column(db.Text)
     cancelled_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'))
+    # Whether this order's items have been taken off the farmer's listings.
+    # Set when the order is confirmed, cleared if a confirmed order is later
+    # cancelled. See the same field on PurchaseRequest.
+    stock_committed = db.Column(db.Boolean, nullable=False, default=False)
+    # Denormalised from the payments table so a list of orders can be rendered
+    # without a join per row. 'not_required' covers everything placed before
+    # online payment existed — those must not appear as unpaid forever.
+    payment_status = db.Column(
+        db.Enum('not_required', 'pending', 'paid', 'refunded', name='order_payment_status'),
+        nullable=False, default='pending')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -153,6 +163,7 @@ class FamilyPackOrder(db.Model):
             } if self.coupon else None,
             'purchase_mode': self.purchase_mode,
             'status': self.status,
+            'payment_status': self.payment_status,
             'delivery_address_id': self.delivery_address_id,
             'delivery_notes': self.delivery_notes,
             'customer_message': self.customer_message,

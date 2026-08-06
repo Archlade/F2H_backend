@@ -2,6 +2,22 @@ from datetime import datetime
 from ..extensions import db, socketio
 from ..models import FamilyPack, FamilyPackOrder, RequestStatusHistory, Chat, Product
 from .notification_service import create_notification
+from . import order_money
+from . import stock_service as stock
+
+
+def _pack_items(order):
+    """The (product, quantity) pairs an order takes off the farmer's listings.
+
+    A family pack order references either a curated pack or a weekly
+    subscription — never both, and the contents live on whichever it is. Items
+    whose product row has gone are skipped rather than crashing the
+    transition; there is no stock left to move on a deleted listing.
+    """
+    source = order.pack or order.subscription
+    if source is None:
+        return []
+    return [(item.product, item.quantity) for item in source.items if item.product]
 
 def create_family_pack_order(customer_id: int, data: dict):
     pack_id = data.get('pack_id')
@@ -72,18 +88,32 @@ def create_family_pack_order(customer_id: int, data: dict):
         body=f"You have a new Family Pack order for {pack.name}",
         data={'order_id': order.id, 'pack_id': pack.id}
     )
+    # The order above is already committed, so this commit is the
+    # notification's own. Without it the row is discarded when the session is
+    # torn down at the end of the request — the farmer never sees the order in
+    # their list, and the push that now rides on the same commit never goes out
+    # either.
+    db.session.commit()
 
     socketio.emit('new_notification', {'type': 'new_request', 'order_id': order.id}, room=f"user_{pack.farmer_id}")
     return order
 
 
 def update_family_pack_order_status(order_id: int, actor_id: int, actor_role: str, new_status: str, data: dict = None):
-    order = FamilyPackOrder.query.get_or_404(order_id)
+    # Locked for the transition — see the same guard in request_service. A
+    # concurrent complete/cancel would otherwise credit the farmer and refund
+    # the customer for one order.
+    from ..utils.locking import lock_row
+    order = lock_row(FamilyPackOrder, order_id)
+    if order is None:
+        from flask import abort
+        abort(404)
     data = data or {}
 
     # By side of this order, not account role: a farmer who ordered someone
     # else's pack is its buyer and may only cancel it.
-    from ..models.request import party_for, party_may_set
+    from ..models.request import (buyer_may_cancel, cancellation_refused_reason,
+                                  party_for, party_may_set)
     party = party_for(order, actor_id, actor_role)
     if party is None:
         raise PermissionError('Not authorized')
@@ -92,8 +122,38 @@ def update_family_pack_order_status(order_id: int, actor_id: int, actor_role: st
         noun = {'buyer': 'buyer', 'seller': 'seller'}.get(party, actor_role)
         raise PermissionError(f"The {noun} cannot set an order to '{new_status}'")
 
+    # Same cancellation window as purchase requests — the rule lives in
+    # request.py so the two order tables cannot drift apart on it. Weekly
+    # subscription deliveries are born at 'confirmed', so this closes their
+    # buyer-cancellation window the moment they are generated; stopping the
+    # *subscription* is the customer's control there, not cancelling a basket
+    # the farmer is already picking.
+    if new_status == 'cancelled' and party == 'buyer' and not buyer_may_cancel(order):
+        raise PermissionError(cancellation_refused_reason(order))
+
     if not order.can_transition_to(new_status):
         raise ValueError(f"Cannot transition from '{order.status}' to '{new_status}'")
+
+    # An order is not closed out before its cash is in — see order_money.
+    if order_money.payment_blocks(order, new_status):
+        raise ValueError(order_money.payment_block_reason(order, new_status))
+
+    order_money.settle(order, new_status, f'family pack order #{order.id}')
+
+    # Stock moves first, so a shortfall aborts the whole transition rather than
+    # leaving a confirmed order behind that the farmer cannot fill.
+    #
+    # This used to read `if prod and available >= wanted:` — when a product was
+    # short it simply skipped the deduction and confirmed the order anyway, so
+    # the pack was oversold and nothing recorded that it had happened. It is now
+    # all or nothing across the pack's items: short on one product means none of
+    # them leave the shelf and the farmer is told which.
+    if new_status == 'confirmed' and not order.stock_committed:
+        stock.commit_items(_pack_items(order))
+        order.stock_committed = True
+    elif new_status == 'cancelled' and order.stock_committed:
+        stock.restore_items(_pack_items(order))
+        order.stock_committed = False
 
     old_status = order.status
     order.status = new_status
@@ -103,14 +163,6 @@ def update_family_pack_order_status(order_id: int, actor_id: int, actor_role: st
     if new_status == 'cancelled':
         order.cancellation_reason = data.get('reason', '')
         order.cancelled_by = actor_id
-
-    # Stock deduction when confirmed
-    if new_status == 'confirmed':
-        for item in order.pack.items:
-            prod = Product.query.get(item.product_id)
-            if prod and float(prod.available_quantity) >= float(item.quantity):
-                prod.available_quantity = float(prod.available_quantity) - float(item.quantity)
-                prod.update_stock_status()
 
     _add_status_history(order.id, old_status, new_status, actor_id, data.get('note', ''))
 

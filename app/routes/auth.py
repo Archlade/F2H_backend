@@ -1,3 +1,4 @@
+from datetime import datetime
 from urllib.parse import quote
 
 from flask import Blueprint, current_app, request, jsonify
@@ -63,6 +64,23 @@ def refresh():
     if not user or not user.is_active or user.deleted_at:
         return jsonify({'error': 'Account is no longer active',
                         'code': 'TOKEN_INVALID'}), 401
+
+    # A refresh token lives for thirty days, so this is the one that matters
+    # most after a password reset: without this check an intruder who grabbed a
+    # refresh token could keep minting fresh 24-hour access tokens for a month
+    # after the owner locked them out.
+    #
+    # The JWT loader applies the same rule to every request, but it is repeated
+    # here deliberately — this route already re-reads the user for exactly this
+    # class of check, and the two lines are cheaper than assuming.
+    changed_at = user.password_changed_at
+    issued_at = get_jwt().get('iat')
+    if changed_at and issued_at:
+        from datetime import timezone
+        issued = datetime.fromtimestamp(issued_at, tz=timezone.utc).replace(tzinfo=None)
+        if issued < changed_at.replace(microsecond=0):
+            return jsonify({'error': 'Your password was changed. Please sign in again.',
+                            'code': 'TOKEN_INVALID'}), 401
 
     access = create_access_token(identity=str(user.id),
                                  additional_claims={'role': user.role_name})

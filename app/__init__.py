@@ -39,6 +39,7 @@ def create_app():
     from .routes.requests import requests_bp
     from .routes.chat import chat_bp
     from .routes.notifications import notifications_bp
+    from .routes.devices import devices_bp
     from .routes.reviews import reviews_bp
     from .routes.favorites import favorites_bp
     from .routes.categories import categories_bp
@@ -46,6 +47,9 @@ def create_app():
     from .routes.admin import admin_bp
     from .routes.uploads import uploads_bp
     from .routes.homepage import homepage_bp
+    from .routes.banners import banners_bp
+    from .routes.payments import payments_bp
+    from .routes.payouts import payouts_bp
     from .routes.family_packs import family_packs_bp
     from .routes.family_pack_orders import family_pack_orders_bp
     from .routes.family_pack_subscriptions import family_pack_subscriptions_bp
@@ -58,6 +62,7 @@ def create_app():
     app.register_blueprint(requests_bp, url_prefix='/api/requests')
     app.register_blueprint(chat_bp, url_prefix='/api/chats')
     app.register_blueprint(notifications_bp, url_prefix='/api/notifications')
+    app.register_blueprint(devices_bp, url_prefix='/api/devices')
     app.register_blueprint(reviews_bp, url_prefix='/api/reviews')
     app.register_blueprint(favorites_bp, url_prefix='/api/favorites')
     app.register_blueprint(categories_bp, url_prefix='/api/categories')
@@ -65,6 +70,9 @@ def create_app():
     app.register_blueprint(admin_bp, url_prefix='/api/admin')
     app.register_blueprint(uploads_bp, url_prefix='/api/uploads')
     app.register_blueprint(homepage_bp, url_prefix='/api/homepage')
+    app.register_blueprint(banners_bp, url_prefix='/api/banners')
+    app.register_blueprint(payments_bp, url_prefix='/api/payments')
+    app.register_blueprint(payouts_bp, url_prefix='/api/payouts')
     app.register_blueprint(family_packs_bp, url_prefix='/api/family-packs')
     app.register_blueprint(family_pack_orders_bp, url_prefix='/api/family-pack-orders')
     app.register_blueprint(family_pack_subscriptions_bp, url_prefix='/api/family-pack-subscriptions')
@@ -85,7 +93,46 @@ def create_app():
             return None
         if not user or not user.is_active or user.deleted_at:
             return None
+        if _token_predates_password_change(user, jwt_data):
+            return None
         return user
+
+    def _token_predates_password_change(user, jwt_data):
+        """True when this token was minted before the password last changed.
+
+        This is what makes a password reset actually evict anyone else who is
+        signed in. Without it, the one situation the reset flow exists for —
+        somebody else has my account — leaves the intruder with a working
+        access token for the rest of its 24 hours, and a refresh token good for
+        thirty days.
+
+        Enforced here rather than at the reset endpoint because this loader is
+        the single gate every authenticated request already passes through; a
+        check anywhere else would have to be remembered on each new route.
+        """
+        changed_at = getattr(user, 'password_changed_at', None)
+        if changed_at is None:
+            # Never changed, or an account that predates the column. Treated as
+            # "no cutoff" so the migration signs nobody out.
+            return False
+
+        issued_at = jwt_data.get('iat')
+        if issued_at is None:
+            # No issued-at claim to compare against. Fail open: refusing here
+            # would lock out every session on a deployment whose tokens were
+            # minted without one, and the account checks above still apply.
+            return False
+
+        from datetime import datetime, timezone
+        issued = datetime.fromtimestamp(issued_at, tz=timezone.utc).replace(tzinfo=None)
+
+        # `iat` is whole seconds while password_changed_at has microseconds, so
+        # a token issued in the same second as the change would otherwise be
+        # rejected — which is exactly the token the reset endpoint hands back to
+        # the person who just reset their own password. The second of grace
+        # costs nothing: an attacker cannot mint a token in that window without
+        # the new password.
+        return issued < changed_at.replace(microsecond=0)
 
     @jwt.user_lookup_error_loader
     def user_lookup_failed(_jwt_header, _jwt_data):
@@ -144,10 +191,42 @@ def create_app():
     def csrf_error_callback(error):
         return {'error': str(error), 'code': 'CSRF_ERROR'}, 401
 
+    # Say so at boot when password resets cannot actually be delivered.
+    #
+    # Without this the failure is silent and looks like a bug in the app: the
+    # request succeeds, the API answers "a reset link is on its way", and the
+    # link goes to the server log instead of the inbox. That is fine in
+    # development and invisible in production, which is the worst combination.
+    with app.app_context():
+        from .services.mail_service import mail_config_problem
+        problem = mail_config_problem()
+        if problem:
+            app.logger.warning(
+                'Email is OFF — password reset links will be written to this log '
+                'instead of being sent.\n  Reason: %s\n  See PASSWORD_RESET.md.',
+                problem,
+            )
+
+    # No payment startup check any more: payment is cash on delivery, which
+    # needs no keys and cannot be misconfigured. See PAYMENTS.md.
+
     # Health check
     @app.route('/api/health')
     def health():
-        return {'status': 'ok', 'service': 'F2H API'}
+        # `email` tells a deployment check whether password reset can actually
+        # reach anyone, which is otherwise only discoverable by trying it.
+        from .services.mail_service import mail_config_problem
+        problem = mail_config_problem()
+        return {'status': 'ok', 'service': 'F2H API',
+                'email': 'configured' if problem is None else 'not configured',
+                # Named rather than just flagged, so a deploy check can say what
+                # is wrong instead of only that something is.
+                'email_problem': problem,
+                # Kept in the response, with the same key, so existing deploy
+                # checks and dashboards do not start reporting a missing field
+                # the day this shipped.
+                'payments': 'cash_on_delivery',
+                'payments_problem': None}
 
     # Serve uploaded files
     from flask import send_from_directory

@@ -13,7 +13,7 @@ def upload_image():
     file = request.files['file']
     subfolder = request.form.get('type', 'misc')
     # Validate subfolder
-    allowed_subfolders = ['products', 'avatars', 'covers', 'misc']
+    allowed_subfolders = ['products', 'avatars', 'covers', 'banners', 'misc']
     if subfolder not in allowed_subfolders:
         subfolder = 'misc'
     try:

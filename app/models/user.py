@@ -31,6 +31,14 @@ class User(db.Model):
     is_verified = db.Column(db.Boolean, default=False)
     email_verified_at = db.Column(db.DateTime)
     last_login_at = db.Column(db.DateTime)
+    # When the password was last reset or changed. Every access token issued
+    # before this moment is refused, which is what makes "reset my password"
+    # actually evict whoever else was signed in — the whole point of the
+    # feature, and not something a stateless JWT gives you for free.
+    #
+    # Null means "never changed since this column existed", which is treated as
+    # no cutoff: a migration must not sign out every user at once.
+    password_changed_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     deleted_at = db.Column(db.DateTime)
@@ -42,6 +50,8 @@ class User(db.Model):
     addresses = db.relationship('Address', foreign_keys='Address.user_id', back_populates='user')
     notifications = db.relationship('Notification', foreign_keys='Notification.recipient_id',
                                     back_populates='recipient')
+    device_tokens = db.relationship('DeviceToken', foreign_keys='DeviceToken.user_id',
+                                    back_populates='user', cascade='all, delete-orphan')
     sent_messages = db.relationship('Message', foreign_keys='Message.sender_id', back_populates='sender')
     favorites = db.relationship('Favorite', foreign_keys='Favorite.user_id', back_populates='user')
     reviews_given = db.relationship('Review', foreign_keys='Review.reviewer_id', back_populates='reviewer')

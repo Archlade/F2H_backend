@@ -11,6 +11,7 @@ from ..extensions import db, socketio
 from ..models import (FamilyPackSubscription, FamilyPackSubscriptionItem,
                       FamilyPackOrder, Product, Address, RequestStatusHistory)
 from .notification_service import create_notification
+from . import stock_service as stock
 
 # How many days ahead a delivery is created, so the farmer can prepare.
 LEAD_DAYS = 2
@@ -230,6 +231,30 @@ def _create_delivery(sub, delivery_date):
 
     total = round(subtotal - discount, 2)
 
+    # Stock comes off before the delivery row is created, not after.
+    #
+    # A weekly delivery is born already `confirmed` — the farmer accepted the
+    # subscription once and these runs skip the accept step — so it owes the
+    # same deduction as any other confirmed order. Taking it first means a
+    # shortfall costs nothing to unwind: there is no order yet to delete, and
+    # crucially no rollback, which would take every other subscription's
+    # delivery in this batch down with it.
+    #
+    # This used to be `max(0.0, available - wanted)`: a shortfall clamped to
+    # zero and the delivery was generated anyway, leaving the farmer owing a
+    # basket they had no stock for with nothing recorded to say so.
+    stock_items = [(item.product, item.quantity) for item in sub.items if item.product]
+    try:
+        stock.commit_items(stock_items)
+    except stock.InsufficientStock as short:
+        # This week is skipped rather than half-filled. The notification is
+        # queued on the session and lands with the batch's own commit.
+        _notify(sub.farmer_id, sub.customer_id, 'status_update',
+                'Weekly basket could not be prepared',
+                f"The basket due {delivery_date:%a %d %b} was not created. {short}",
+                {'subscription_id': sub.id})
+        return None
+
     order = FamilyPackOrder(
         customer_id=sub.customer_id,
         farmer_id=sub.farmer_id,
@@ -248,6 +273,10 @@ def _create_delivery(sub, delivery_date):
         delivery_address_id=sub.delivery_address_id,
         delivery_notes=sub.delivery_notes,
         customer_message=sub.customer_message,
+        # The deduction above is part of this transaction, so if anything below
+        # rolls back the stock goes back with it — and if the order survives,
+        # this flag is what lets a later cancellation return it.
+        stock_committed=True,
     )
     db.session.add(order)
     try:
@@ -273,14 +302,21 @@ def _create_delivery(sub, delivery_date):
         changed_by=sub.customer_id, note='Auto-generated from weekly basket',
     ))
 
-    for item in sub.items:
-        product = item.product
-        if not product:
-            continue
-        available = float(product.available_quantity)
-        wanted = float(item.quantity)
-        product.available_quantity = max(0.0, available - wanted)
-        product.update_stock_status()
+    # Freeze what will be collected at the door.
+    #
+    # A weekly delivery is born at 'confirmed' rather than transitioning into
+    # it, so it never passes through `order_money.settle` and would otherwise
+    # reach the customer with no payment row at all. The collect endpoint does
+    # create one on the spot when it finds none — so this is not the difference
+    # between working and broken — but it would snapshot the commission rate on
+    # the *delivery day* instead of the day the order was made. Two baskets
+    # generated the same morning could then split differently if the rate
+    # changed in between, which is exactly the drift `commission_rate` is a
+    # column to prevent.
+    #
+    # After the flush, so `order.id` exists for the foreign key.
+    from . import payment_service as payments
+    payments.ensure_for_order(order)
 
     return order
 

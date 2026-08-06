@@ -5,6 +5,12 @@
 *.pem
 *.key
 
+# Firebase service-account key. Unlike the app's google-services.json this one
+# is a real credential: it can send a push to every user you have.
+secrets/
+*-service-account.json
+*firebase-adminsdk*.json
+
 # Virtual environments
 .venv/
 venv/
@@ -34,3 +40,7 @@ instance/
 Thumbs.db
 .idea/
 .vscode/
+.env
+.venv/
+.env
+.venv/

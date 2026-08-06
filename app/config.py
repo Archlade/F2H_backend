@@ -79,6 +79,30 @@ class Config:
     # Socket.IO
     SOCKETIO_ASYNC_MODE = os.environ.get('SOCKETIO_ASYNC_MODE', 'eventlet')
 
+    # Payment is cash on delivery. There is nothing to configure — no keys, no
+    # secrets, no third party — which is why there is no PAYMENTS_ENABLED flag
+    # here: a switch whose only setting is "on" is a switch someone will
+    # eventually turn off by accident.
+
+    # What F2H keeps from each order, as a percentage of what the customer
+    # actually paid. Snapshotted onto every payment row when it is created, so
+    # changing this never rewrites what past orders owed.
+    PLATFORM_COMMISSION_RATE = float(os.environ.get('PLATFORM_COMMISSION_RATE', 20))
+    # A redemption below this is not worth a bank transfer's effort.
+    MIN_PAYOUT_AMOUNT = float(os.environ.get('MIN_PAYOUT_AMOUNT', 200))
+
+    # Push notifications — optional, like email. Without a credential the app
+    # still creates every notification row and still delivers over Socket.IO;
+    # only the push to a backgrounded phone is missing.
+    #
+    # This is the *service account* key (Firebase Console → Project settings →
+    # Service accounts → Generate new private key), not the app's
+    # google-services.json. That one holds public client identifiers; this one
+    # can send a notification to every user you have, so keep it out of the
+    # repository. Falls back to GOOGLE_APPLICATION_CREDENTIALS / the metadata
+    # server when unset, which is what a Cloud Run deployment already has.
+    FIREBASE_CREDENTIALS = os.environ.get('FIREBASE_CREDENTIALS')
+
     # Admin seed
     ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL')
     ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')

@@ -70,7 +70,14 @@ def send_message(chat_id: int, sender_id: int, content: str):
         notif_type='new_message',
         title='New Message',
         body=content[:100],
-        data={'chat_id': chat_id, 'message_id': msg.id},
+        # `request_id` rides along because the mobile app currently ships with
+        # messaging switched off (AppConfig.chatEnabled). A push carrying only
+        # a chat id has nowhere to land there; with the order id present the
+        # tap opens the order the conversation belongs to instead of dumping
+        # the user on the notification list.
+        data={'chat_id': chat_id, 'message_id': msg.id,
+              'request_id': chat.request_id,
+              'family_pack_order_id': chat.family_pack_order_id},
     )
     db.session.commit()
 

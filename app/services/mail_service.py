@@ -17,34 +17,54 @@ except ImportError:  # pragma: no cover - Flask-Mail is optional at runtime
 from ..extensions import mail
 
 
+def mail_config_problem():
+    """The specific reason mail cannot be sent, or None when it can.
+
+    Six things have to line up and "not configured" is useless on its own —
+    the credentials can be perfectly correct while the package that sends
+    them is missing, which looks identical in the log and is nothing like the
+    same problem. Naming the failure is the difference between a one-line fix
+    and an afternoon.
+    """
+    if Message is None or mail is None:
+        return ('Flask-Mail is not installed in the Python environment running '
+                'this server. Install it with:  pip install Flask-Mail==0.10.0  '
+                '(check you are in the right virtualenv — a venv built on '
+                'another machine or OS will not work here)')
+
+    missing = [name for name in
+               ('MAIL_SERVER', 'MAIL_USERNAME', 'MAIL_PASSWORD', 'MAIL_DEFAULT_SENDER')
+               if not current_app.config.get(name)]
+    if missing:
+        return (f'{", ".join(missing)} not set. Check backend/.env, and that the '
+                'server was restarted after editing it')
+
+    if str(current_app.config.get('MAIL_PASSWORD', '')).startswith('REPLACE_'):
+        return 'MAIL_PASSWORD is still the placeholder from .env'
+
+    return None
+
+
 def mail_is_configured() -> bool:
     """True only when there is a complete set of credentials to send with.
 
-    The username and password count, not just the server. .env ships with
-    MAIL_SERVER already pointing at Gmail so that filling in two blanks is all
-    it takes to go live — but a half-filled config must not be treated as
-    working, or every reset request would stall on an SMTP connection that is
-    going to be refused anyway.
+    A half-filled config must not be treated as working, or every reset
+    request would stall on an SMTP connection that is going to be refused.
     """
-    return bool(
-        Message is not None
-        and mail is not None
-        and current_app.config.get('MAIL_SERVER')
-        and current_app.config.get('MAIL_USERNAME')
-        and current_app.config.get('MAIL_PASSWORD')
-        and current_app.config.get('MAIL_DEFAULT_SENDER')
-    )
+    return mail_config_problem() is None
 
 
 def send_email(to: str, subject: str, body: str, html: str = None) -> bool:
     """Returns True if the message was handed to an SMTP server, False if it
     was only logged. Never raises — a mail outage must not break the request."""
-    if not mail_is_configured():
+    problem = mail_config_problem()
+    if problem:
         current_app.logger.warning(
-            '\n─── EMAIL NOT SENT (SMTP not configured) ───\n'
+            '\n─── EMAIL NOT SENT ───\n'
+            'Reason: %s\n\n'
             'To: %s\nSubject: %s\n\n%s\n'
-            '────────────────────────────────────────────',
-            to, subject, body,
+            '──────────────────────',
+            problem, to, subject, body,
         )
         return False
 
