@@ -226,7 +226,17 @@ def create_app():
                 # checks and dashboards do not start reporting a missing field
                 # the day this shipped.
                 'payments': 'cash_on_delivery',
-                'payments_problem': None}
+                'payments_problem': None,
+                # Push fails silently by design — the app still shows its
+                # in-app banner over Socket.IO — so without this line the only
+                # symptom is "notifications never reach the phone" and no way
+                # to tell why.
+                'push': 'configured' if _push_problem() is None else 'not configured',
+                'push_problem': _push_problem()}
+
+    def _push_problem():
+        from .services.push_service import push_config_problem
+        return push_config_problem()
 
     # Serve uploaded files
     from flask import send_from_directory

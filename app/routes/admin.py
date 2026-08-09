@@ -4,7 +4,7 @@ from ..utils.decorators import admin_required
 from ..utils.helpers import paginate_response, log_audit
 from ..models import (User, Role, FarmerProfile, Product, PurchaseRequest, Review, Report,
                        FeaturedFarmer, FeaturedProduct, HomepageSection, Announcement, Category,
-                       FamilyPack, FamilyPackOrder)
+                       FamilyPack, FamilyPackOrder, FamilyPackSubscription)
 
 from ..extensions import db
 from datetime import datetime
@@ -535,6 +535,42 @@ def approve_family_pack(pack_id):
     log_audit(admin_id, 'approve_family_pack', 'family_pack', pack_id)
     db.session.commit()
     return jsonify({'is_approved': pack.is_approved}), 200
+
+
+@admin_bp.route('/family-pack-subscriptions', methods=['GET'])
+@jwt_required()
+@admin_required
+def list_admin_family_pack_subscriptions():
+    """Weekly baskets, newest first, filterable by status.
+
+    Exists because a basket sits at 'pending' until the farmer accepts it, and
+    a farmer who never opens the app leaves a customer waiting with nobody able
+    to see it, let alone act. `counts` is returned alongside so the screen can
+    show how many are waiting without a second request — it is the number an
+    admin actually opens this page for.
+    """
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'),
+                                max_per_page=100)
+    status = request.args.get('status')
+
+    query = FamilyPackSubscription.query
+    if status:
+        query = query.filter(FamilyPackSubscription.status == status)
+
+    total = query.count()
+    subs = (query.order_by(FamilyPackSubscription.created_at.desc())
+            .offset((page - 1) * per_page).limit(per_page).all())
+
+    payload = paginate_response(
+        # Items are the whole basket and would dominate a list response; the
+        # detail screen fetches them when one is opened.
+        [s.to_dict(include_items=False) for s in subs], total, page, per_page)
+    payload['counts'] = {
+        state: db.session.query(func.count(FamilyPackSubscription.id))
+        .filter(FamilyPackSubscription.status == state).scalar()
+        for state in ('pending', 'active', 'paused', 'cancelled')
+    }
+    return jsonify(payload), 200
 
 
 @admin_bp.route('/family-pack-orders', methods=['GET'])

@@ -187,8 +187,17 @@ def set_subscription_status(subscription_id: int, actor_id: int, actor_role: str
     if new_status not in allowed.get(sub.status, []):
         raise ValueError(f"Cannot go from '{sub.status}' to '{new_status}'")
 
-    if new_status == 'active' and sub.status == 'pending' and actor_role != 'farmer':
-        raise PermissionError('Only the farmer can accept a weekly basket')
+    # Accepting a basket is the farmer's call — it commits them to picking
+    # produce every week — so the customer cannot accept their own request.
+    #
+    # An admin can, though. A subscription sits at 'pending' until somebody acts
+    # on it, and a farmer who never opens the app leaves a customer waiting
+    # indefinitely with nothing anyone can do about it. Admins already resolve
+    # stalled orders everywhere else in this system; there was no reason for
+    # this one route to be the exception, and the audit trail records who did it.
+    if (new_status == 'active' and sub.status == 'pending'
+            and actor_role not in ('farmer', 'admin')):
+        raise PermissionError('Only the farmer or an admin can accept a weekly basket')
 
     was = sub.status
     sub.status = new_status

@@ -122,6 +122,31 @@ def is_enabled():
     return _firebase_app() is not None
 
 
+def push_config_problem():
+    """The specific reason push cannot run, or None.
+
+    Same idea as the mail service: "not configured" on its own tells nobody
+    anything, and this failure is close to invisible from the outside. The app
+    still shows its in-app banner over Socket.IO whether or not FCM works, so
+    "notifications appear inside the app but never on the phone" is exactly what
+    a missing service-account key looks like — and nothing anywhere says so.
+    """
+    if firebase_admin is None:
+        return 'firebase-admin is not installed (pip install firebase-admin)'
+
+    path = (current_app.config.get('FIREBASE_CREDENTIALS')
+            if has_app_context() else os.environ.get('FIREBASE_CREDENTIALS'))
+
+    if not path and not os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
+        return ('FIREBASE_CREDENTIALS is not set in backend/.env — no push is '
+                'ever sent, so notifications only appear while the app is open')
+    if path and not os.path.exists(path):
+        return f'FIREBASE_CREDENTIALS points at {path}, which does not exist'
+    if _firebase_app() is None:
+        return 'the Firebase service account was rejected — see the server log'
+    return None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def dispatch_to_user(user_id, title, body='', data=None):

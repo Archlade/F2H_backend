@@ -348,6 +348,32 @@ class TheBuyersCancellationWindowClosesAtConfirmation(unittest.TestCase):
         self.assertFalse(self.buyer_may_cancel('confirmed'))
 
 
+class WhoMayAcceptAWeeklyBasket(unittest.TestCase):
+    """`set_subscription_status` in family_pack_subscription_service.py.
+
+    A subscription commits a farmer to picking produce every week, so accepting
+    one is their decision — the customer cannot accept their own request. An
+    admin can, because otherwise a farmer who never opens the app leaves a
+    customer waiting with nobody able to resolve it.
+    """
+
+    def may_accept(self, actor_role, from_status='pending'):
+        if from_status != 'pending':
+            return True                      # not an acceptance any more
+        return actor_role in ('farmer', 'admin')
+
+    def test_the_farmer_may(self):
+        self.assertTrue(self.may_accept('farmer'))
+
+    def test_an_admin_may(self):
+        self.assertTrue(self.may_accept('admin'))
+
+    def test_the_customer_may_not_accept_their_own_request(self):
+        # The whole point of the pending state. A customer who could accept
+        # their own basket would be committing somebody else's labour.
+        self.assertFalse(self.may_accept('customer'))
+
+
 class CancellingOnlyReversesMoneyThatMoved(unittest.TestCase):
     """Under cash most cancellations happen before anyone has paid — there is
     nothing to return and no credit to take back."""

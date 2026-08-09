@@ -18,7 +18,13 @@ except ImportError:  # pragma: no cover - depends on the deployment image
 
 
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'}
-ALLOWED_SUBFOLDERS = {'products', 'avatars', 'covers', 'misc'}
+
+# The one list. The upload route used to keep its own copy that had 'banners'
+# in it while this one did not, so every admin banner image was quietly filed
+# under 'misc' — the upload "succeeded", returned a URL, and displayed fine, so
+# nothing ever looked broken. Two allow-lists for one decision will always drift;
+# the route imports this now.
+ALLOWED_SUBFOLDERS = {'products', 'avatars', 'covers', 'banners', 'misc'}
 
 # Long edge in pixels. A 12MP phone photo is far larger than anything the site
 # displays, and storing the original wastes disk and bandwidth.

@@ -14,6 +14,28 @@ def get_locations():
     return jsonify([l.to_dict() for l in locs]), 200
 
 
+# Mirrors the locations.location_type ENUM. A value outside this set reaches
+# MySQL as an invalid ENUM and fails at commit with a 500, so it is caught here
+# and answered as the bad request it is.
+VALID_LOCATION_TYPES = ('current', 'farm', 'home', 'work', 'other')
+
+
+def _clear_other_primaries(user_id, keep_id=None):
+    """Only one location per user may be primary.
+
+    `add_location` has always done this; `update_location` did not, so setting
+    a location primary by PUT left the previous one primary as well. Nothing
+    reads `is_primary` in a way that breaks today — the product feed asks for
+    `location_type='current'` first and only falls back to the flag — but two
+    rows both claiming to be the one primary is a trap for whoever writes the
+    next query, and `.first()` on it is a coin flip.
+    """
+    query = Location.query.filter_by(user_id=user_id)
+    if keep_id is not None:
+        query = query.filter(Location.id != keep_id)
+    query.update({'is_primary': False})
+
+
 @locations_bp.route('', methods=['POST'])
 @jwt_required()
 def add_location():
@@ -22,9 +44,14 @@ def add_location():
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
+    location_type = data.get('location_type', 'current')
+    if location_type not in VALID_LOCATION_TYPES:
+        return jsonify({'error': f"Unknown location type '{location_type}'. "
+                                 f"Expected one of: {', '.join(VALID_LOCATION_TYPES)}."}), 400
+
     # If setting as primary, remove others
     if data.get('is_primary'):
-        Location.query.filter_by(user_id=user_id).update({'is_primary': False})
+        _clear_other_primaries(user_id)
 
     loc = Location(
         user_id=user_id,
@@ -49,7 +76,17 @@ def add_location():
 def update_location(loc_id):
     user_id = int(get_jwt_identity())
     loc = Location.query.filter_by(id=loc_id, user_id=user_id).first_or_404()
-    data = request.get_json()
+    data = request.get_json() or {}
+
+    if 'location_type' in data and data['location_type'] not in VALID_LOCATION_TYPES:
+        return jsonify({'error': f"Unknown location type '{data['location_type']}'. "
+                                 f"Expected one of: {', '.join(VALID_LOCATION_TYPES)}."}), 400
+
+    # Same rule as creating one, which is the point — this route used to skip
+    # it, so saving a farm address by PUT produced a second primary alongside
+    # whichever row already held the flag.
+    if data.get('is_primary'):
+        _clear_other_primaries(user_id, keep_id=loc.id)
 
     allowed = ['location_type', 'label', 'address_line1', 'city', 'state',
                'postal_code', 'latitude', 'longitude', 'is_primary']
