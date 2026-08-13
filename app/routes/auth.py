@@ -4,8 +4,8 @@ from urllib.parse import quote
 from flask import Blueprint, current_app, request, jsonify
 from flask_jwt_extended import (
     jwt_required, get_jwt_identity, get_jwt,
-    set_access_cookies, unset_jwt_cookies, create_access_token,
-    create_refresh_token
+    set_access_cookies, set_refresh_cookies, unset_jwt_cookies,
+    create_access_token, create_refresh_token
 )
 from ..services.auth_service import (
     register_user, login_user, update_user_profile, change_password,
@@ -15,8 +15,9 @@ from ..services.mail_service import send_password_reset_email
 from ..services.notification_service import get_unread_count
 from ..models import User
 from ..utils.decorators import role_required
-from ..utils.validators import password_problem, phone_problem
-from ..extensions import limiter
+from ..utils.validators import (email_problem, normalise_phone, password_problem,
+                               phone_problem)
+from ..extensions import db, limiter
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -35,20 +36,31 @@ def _is_native_client():
 def _auth_response(user, payload, status=200):
     """One login/register/reset reply that serves both clients.
 
-    The website always gets its cookie; the app additionally gets a token pair
-    it can store itself. Nothing about the browser flow changes.
+    Both clients get a refresh token; only the app gets it in the body, because
+    only the app has somewhere to put it. The browser gets it as an httpOnly
+    cookie it cannot read, which is the point.
+
+    This used to issue the browser an access cookie and nothing else. Access
+    tokens last 24 hours and refresh tokens 30 days, so the app stayed signed in
+    for a month while the website silently signed people out once a day, with no
+    way to renew — there was no refresh cookie to renew *with*. Anyone using both
+    experienced that as the website being broken.
     """
     access = create_access_token(identity=str(user.id),
                                  additional_claims={'role': user.role_name})
+    refresh = create_refresh_token(identity=str(user.id),
+                                   additional_claims={'role': user.role_name})
     if _is_native_client():
         payload = dict(payload)
         payload['access_token'] = access
-        payload['refresh_token'] = create_refresh_token(
-            identity=str(user.id), additional_claims={'role': user.role_name})
+        payload['refresh_token'] = refresh
         payload['token_type'] = 'Bearer'
         payload['expires_in'] = current_app.config['JWT_ACCESS_TOKEN_EXPIRES']
     resp = jsonify(payload)
     set_access_cookies(resp, access)
+    # Scoped by flask-jwt-extended to the refresh endpoint's path and paired
+    # with its own CSRF cookie, so it is not sent on ordinary API calls.
+    set_refresh_cookies(resp, refresh)
     return resp, status
 
 
@@ -114,6 +126,13 @@ def register():
         if not str(data.get(field) or '').strip():
             return jsonify({'error': f'{label} is required'}), 400
 
+    # Checked before the password so a mistyped address is reported first —
+    # it is the field the account is recovered through, and until now it was
+    # only checked for presence. 'asdf' was a valid signup.
+    problem = email_problem(data.get('email'))
+    if problem:
+        return jsonify({'error': problem}), 400
+
     problem = password_problem(data['password'])
     if problem:
         return jsonify({'error': problem}), 400
@@ -121,6 +140,12 @@ def register():
     problem = phone_problem(data.get('phone'))
     if problem:
         return jsonify({'error': problem}), 400
+
+    # Stored as the bare ten digits, whatever the person typed. '+91 98765
+    # 43210' and '9876543210' are one number, and keeping them as written means
+    # the same contact looks like two — and a `tel:` link built from one of them
+    # may not dial.
+    data['phone'] = normalise_phone(data.get('phone'))
 
     role = data.get('role', 'customer')
     if role not in ('customer', 'farmer'):
@@ -293,6 +318,61 @@ def reset_password():
     # Sign the user straight in — they just proved control of the inbox.
     return _auth_response(user, {'message': 'Password reset successfully',
                                  'user': user.to_dict(include_private=True)}, 200)
+
+
+@auth_bp.route('/delete-account', methods=['GET'])
+@jwt_required()
+def delete_account_status():
+    """Whether this account can be deleted, and what is in the way.
+
+    Asked before the form is shown so somebody mid-delivery is told up front
+    rather than after typing their password and pressing a red button.
+    """
+    from ..services.account_deletion import deletion_blockers
+
+    user = User.query.get(int(get_jwt_identity()))
+    if not user or user.deleted_at:
+        return jsonify({'error': 'Account not found'}), 404
+
+    blocker = deletion_blockers(user)
+    return jsonify({'can_delete': blocker is None, 'blocker': blocker}), 200
+
+
+@auth_bp.route('/delete-account', methods=['POST'])
+@jwt_required()
+@limiter.limit('5 per hour')
+def delete_account_route():
+    """Delete the signed-in account.
+
+    Requires the password again. This is irreversible and one tap from a
+    settings screen, so re-authenticating is the difference between a decision
+    and an accident — and it stops a borrowed unlocked phone from wiping
+    somebody's farm.
+    """
+    from ..services.account_deletion import DeletionRefused, delete_account
+    from ..services.auth_service import verify_password
+
+    data = request.get_json(silent=True) or {}
+    user = User.query.get(int(get_jwt_identity()))
+    if not user or user.deleted_at:
+        return jsonify({'error': 'Account not found'}), 404
+
+    password = data.get('password') or ''
+    if not password or not verify_password(password, user.password_hash):
+        # Deliberately not "wrong password" — same wording whatever the reason,
+        # so this endpoint cannot be used to probe a password.
+        return jsonify({'error': 'That password is not correct'}), 403
+
+    try:
+        delete_account(user, reason=data.get('reason'))
+    except DeletionRefused as e:
+        return jsonify({'error': str(e)}), 409
+
+    db.session.commit()
+
+    resp = jsonify({'message': 'Your account has been deleted.'})
+    unset_jwt_cookies(resp)
+    return resp, 200
 
 
 @auth_bp.route('/change-password', methods=['POST'])

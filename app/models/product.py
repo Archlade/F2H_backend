@@ -22,6 +22,10 @@ class Product(db.Model):
     pickup_available = db.Column(db.Boolean, default=True)
     is_active = db.Column(db.Boolean, default=True)
     is_featured = db.Column(db.Boolean, default=False)
+    # Whether this product may go into a weekly basket. Curated by admins, and
+    # off by default: a basket commits F2H to sourcing the same item every week,
+    # which is a different promise from listing it for a one-off order.
+    basket_eligible = db.Column(db.Boolean, nullable=False, default=False)
     is_approved = db.Column(db.Boolean, default=True)
     stock_status = db.Column(db.Enum('in_stock', 'low_stock', 'out_of_stock'), default='in_stock')
     low_stock_threshold = db.Column(db.Numeric(10, 3), default=5.0)
@@ -80,6 +84,7 @@ class Product(db.Model):
             'pickup_available': self.pickup_available,
             'is_active': self.is_active,
             'is_featured': self.is_featured,
+            'basket_eligible': self.basket_eligible,
             'is_approved': self.is_approved,
             'stock_status': self.stock_status,
             'rating_avg': float(self.rating_avg) if self.rating_avg else 0.0,

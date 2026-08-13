@@ -100,6 +100,7 @@ def list_products():
         'min_price': request.args.get('min_price', type=float),
         'max_price': request.args.get('max_price', type=float),
         'is_organic': request.args.get('is_organic', type=lambda x: x == 'true'),
+        'basket_eligible': request.args.get('basket_eligible', type=lambda x: x == 'true'),
         'delivery_available': request.args.get('delivery_available', type=lambda x: x == 'true'),
         'pickup_available': request.args.get('pickup_available', type=lambda x: x == 'true'),
         'stock_status': request.args.get('stock_status'),

@@ -57,6 +57,25 @@ def create_purchase_request(customer_id: int, data: dict):
     from .coupon_service import apply_to_total, redeem
     coupon, discount, total = apply_to_total(data.get('coupon_code'), subtotal)
 
+    # The smallest order F2H will take. Under cash on delivery every order is a
+    # physical trip with someone collecting money at the end, and below this the
+    # trip costs more than the order is worth.
+    #
+    # Checked against `total` rather than `subtotal` — the payable amount after
+    # any discount — so a coupon cannot be used to slip under the floor.
+    #
+    # Skipped when the caller is the cart, which has already applied the same
+    # floor to the whole basket. Enforcing it per line as well would make a
+    # valid ₹400 cart of two ₹200 items impossible to check out.
+    if not data.get('skip_minimum'):
+        from flask import current_app
+        minimum = float(current_app.config.get('MIN_ORDER_VALUE', 300))
+        if total < minimum:
+            raise ValueError(
+                f'The minimum order is ₹{minimum:.0f}. This one comes to '
+                f'₹{total:.2f} — add more to your basket to continue.'
+            )
+
     req = PurchaseRequest(
         customer_id=customer_id,
         farmer_id=product.farmer_id,
@@ -152,8 +171,9 @@ def update_request_status(request_id: int, actor_id: int, actor_role: str, new_s
     #
     # Checked here rather than trusted to the UI, because the UI is not what
     # stops a farmer from tapping "Mark complete" on an uncollected order — and
-    # completing one credits their balance with a share of money nobody ever
-    # took, which the platform then pays out for real.
+    # a completed order is one nobody chases for money. Since the farmer was
+    # already paid at pickup, an order closed out without collection is a loss
+    # the platform absorbs silently, which is exactly what this prevents.
     if order_money.payment_blocks(req, new_status):
         raise ValueError(order_money.payment_block_reason(req, new_status))
 
@@ -168,7 +188,7 @@ def update_request_status(request_id: int, actor_id: int, actor_role: str, new_s
     # Done first so that an InsufficientStock aborts the whole transition: no
     # status change, no history row, no notification about an order that was
     # never actually confirmed.
-    order_money.settle(req, new_status, f'order #{req.id}')
+    order_money.settle(req, new_status, f'order #{req.id}', actor_id=actor_id)
 
     if new_status == 'confirmed' and not req.stock_committed and req.product:
         stock.commit(req.product, req.quantity)

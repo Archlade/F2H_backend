@@ -39,6 +39,11 @@ def get_products(filters: dict, customer_lat=None, customer_lon=None, page=1, pe
         query = query.filter(Product.price <= filters['max_price'])
     if filters.get('is_organic'):
         query = query.filter(Product.is_organic == True)
+    # The weekly basket catalogue. Only ever narrows: asking for
+    # basket_eligible=false is not a filter anyone needs, and treating it as one
+    # would quietly offer the *rejected* list to a basket builder.
+    if filters.get('basket_eligible'):
+        query = query.filter(Product.basket_eligible == True)
     if filters.get('delivery_available'):
         query = query.filter(Product.delivery_available == True)
     if filters.get('pickup_available'):

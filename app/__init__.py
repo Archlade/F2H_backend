@@ -49,11 +49,12 @@ def create_app():
     from .routes.homepage import homepage_bp
     from .routes.banners import banners_bp
     from .routes.payments import payments_bp
-    from .routes.payouts import payouts_bp
+    from .routes.cron import cron_bp
     from .routes.family_packs import family_packs_bp
     from .routes.family_pack_orders import family_pack_orders_bp
     from .routes.family_pack_subscriptions import family_pack_subscriptions_bp
     from .routes.coupons import coupons_bp
+    from .routes.cart import cart_bp
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(products_bp, url_prefix='/api/products')
@@ -72,11 +73,19 @@ def create_app():
     app.register_blueprint(homepage_bp, url_prefix='/api/homepage')
     app.register_blueprint(banners_bp, url_prefix='/api/banners')
     app.register_blueprint(payments_bp, url_prefix='/api/payments')
-    app.register_blueprint(payouts_bp, url_prefix='/api/payouts')
+    # Hit by the VPS crontab, authenticated by a shared secret. Off entirely
+    # unless CRON_TOKEN is set.
+    app.register_blueprint(cron_bp, url_prefix='/api/cron')
+    # No payouts blueprint. Farmers are paid in cash at pickup, so there is
+    # nothing to request and nothing to approve. `routes/payouts.py` and
+    # `services/wallet_service.py` are kept unregistered rather than deleted:
+    # the ledger and payout tables still hold the history of every transfer
+    # made under the old model, and that code is how it is read.
     app.register_blueprint(family_packs_bp, url_prefix='/api/family-packs')
     app.register_blueprint(family_pack_orders_bp, url_prefix='/api/family-pack-orders')
     app.register_blueprint(family_pack_subscriptions_bp, url_prefix='/api/family-pack-subscriptions')
     app.register_blueprint(coupons_bp, url_prefix='/api/coupons')
+    app.register_blueprint(cart_bp, url_prefix='/api/cart')
 
 
     # Register socket events

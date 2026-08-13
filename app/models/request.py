@@ -11,10 +11,17 @@ from datetime import datetime
 # seller powers over an order they merely placed.
 PARTY_TRANSITIONS = {
     'buyer': {'cancelled'},
+    # `picked_up` and `out_for_delivery` are deliberately not the seller's to
+    # set. Pickup is the moment F2H collects the produce *and hands the farmer
+    # their cash*, so it is a record of a payment made to them — the party
+    # paying records it, not the party being paid. Leaving it to the seller
+    # would let a farmer mark themselves paid for a collection that never
+    # happened. `out_for_delivery` follows pickup and is equally F2H's.
     'seller': {'accepted', 'rejected', 'chat_active', 'confirmed', 'preparing',
-               'ready_for_pickup', 'out_for_delivery', 'completed', 'cancelled'},
+               'ready_for_pickup', 'completed', 'cancelled'},
     'admin': {'accepted', 'rejected', 'admin_review', 'chat_active', 'confirmed',
-              'preparing', 'ready_for_pickup', 'out_for_delivery', 'completed', 'cancelled'},
+              'preparing', 'picked_up', 'ready_for_pickup', 'out_for_delivery',
+              'completed', 'cancelled'},
 }
 
 # The old names, so nothing that still speaks in account roles breaks.
@@ -83,14 +90,33 @@ def role_may_set(actor_role, new_status):
     return party_may_set(_ROLE_ALIASES.get(actor_role, actor_role), new_status)
 
 
+# The lifecycle forks after `preparing`, on how the produce leaves the farm:
+#
+#   delivery        preparing -> picked_up -> out_for_delivery -> completed
+#   customer pickup preparing -> ready_for_pickup            -> completed
+#
+# `picked_up` is F2H collecting stock from the farm. `ready_for_pickup` is the
+# customer collecting it themselves — the two have always read alike and mean
+# opposite things, which is worth saying once here rather than guessing at each
+# call site.
+#
+# `preparing -> out_for_delivery` was removed on purpose. It let a delivery
+# order reach the customer without ever passing through pickup, and pickup is
+# now where the farmer gets paid — so that shortcut was a way to deliver an
+# order the farmer was never paid for.
 VALID_TRANSITIONS = {
     'pending': ['accepted', 'rejected', 'cancelled', 'admin_review'],
-    'admin_review': ['accepted', 'rejected', 'cancelled'],
+    # `confirmed` is reachable from here for weekly baskets held short of stock:
+    # an admin substitutes the missing items and sends the basket on its way.
+    # Routing that through accepted → chat_active → confirmed would be three
+    # clicks and a chat thread to fix a missing bunch of spinach.
+    'admin_review': ['accepted', 'confirmed', 'rejected', 'cancelled'],
     'accepted': ['chat_active', 'cancelled'],
     'rejected': [],
     'chat_active': ['confirmed', 'cancelled'],
     'confirmed': ['preparing', 'cancelled'],
-    'preparing': ['ready_for_pickup', 'out_for_delivery', 'cancelled'],
+    'preparing': ['picked_up', 'ready_for_pickup', 'cancelled'],
+    'picked_up': ['out_for_delivery', 'cancelled'],
     'ready_for_pickup': ['completed', 'cancelled'],
     'out_for_delivery': ['completed', 'cancelled'],
     'completed': [],
@@ -117,7 +143,8 @@ class PurchaseRequest(db.Model):
     purchase_mode = db.Column(db.Enum('delivery', 'pickup'), nullable=False)
     status = db.Column(
         db.Enum('pending', 'admin_review', 'accepted', 'rejected', 'chat_active',
-                'confirmed', 'preparing', 'ready_for_pickup', 'out_for_delivery', 'completed', 'cancelled'),
+                'confirmed', 'preparing', 'picked_up', 'ready_for_pickup',
+                'out_for_delivery', 'completed', 'cancelled'),
         default='pending'
     )
     delivery_address_id = db.Column(db.Integer, db.ForeignKey('addresses.id', ondelete='SET NULL'))

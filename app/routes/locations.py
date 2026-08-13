@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from ..models import Location, Address
 from ..extensions import db
+from ..utils.validators import address_problem, normalise_state
 
 locations_bp = Blueprint('locations', __name__)
 
@@ -134,6 +135,17 @@ def add_address():
         if not str(data.get(field) or '').strip():
             return jsonify({'error': f'{label} is required'}), 400
 
+    # State and PIN were required but never checked, so any text passed. Under
+    # cash on delivery a wrong address is a van-load of produce at the wrong
+    # door, so both are validated and cross-checked against each other.
+    problem = address_problem(data.get('state'), data.get('postal_code'))
+    if problem:
+        return jsonify({'error': problem}), 400
+
+    # Stored canonically so "kerela" and "Kerala" do not become two states in
+    # the admin's delivery list.
+    data['state'] = (normalise_state(data.get('state')) or data['state']).title()
+
     # A user's first address becomes the default automatically — otherwise the
     # account can end up with saved addresses but nothing marked for checkout.
     is_default = bool(data.get('is_default'))
@@ -179,6 +191,19 @@ def update_address(addr_id):
                          ('state', 'State'), ('postal_code', 'PIN / postal code')):
         if field in data and not str(data.get(field) or '').strip():
             return jsonify({'error': f'{label} is required'}), 400
+
+    # Same validation as creating one. Checked against the *stored* values for
+    # anything the edit does not touch, so changing only the PIN is still
+    # cross-checked against the state already on the row.
+    if 'state' in data or 'postal_code' in data:
+        problem = address_problem(
+            data.get('state', addr.state),
+            data.get('postal_code', addr.postal_code),
+        )
+        if problem:
+            return jsonify({'error': problem}), 400
+        if 'state' in data:
+            data['state'] = (normalise_state(data['state']) or data['state']).title()
 
     # Only one address can be the default, so clear the others first.
     if data.get('is_default'):

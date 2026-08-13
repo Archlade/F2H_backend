@@ -138,7 +138,8 @@ def update_family_pack_order_status(order_id: int, actor_id: int, actor_role: st
     if order_money.payment_blocks(order, new_status):
         raise ValueError(order_money.payment_block_reason(order, new_status))
 
-    order_money.settle(order, new_status, f'family pack order #{order.id}')
+    order_money.settle(order, new_status, f'family pack order #{order.id}',
+                       actor_id=actor_id)
 
     # Stock moves first, so a shortfall aborts the whole transition rather than
     # leaving a confirmed order behind that the farmer cannot fill.

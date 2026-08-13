@@ -1,5 +1,7 @@
 """Shared input validation helpers."""
 
+import re
+
 # A short list of the passwords credential-stuffing tools try first.
 COMMON_PASSWORDS = {
     'password', 'password1', 'password123', '12345678', '123456789', '1234567890',
@@ -23,23 +25,198 @@ def password_problem(password):
     return None
 
 
+def normalise_phone(phone):
+    """Reduce a typed Indian number to its bare 10 digits, or None.
+
+    People write the same number half a dozen ways — `9876543210`,
+    `+91 98765 43210`, `098765 43210`, `91-9876543210`. All of them are one
+    number, and storing them differently means a farmer and a customer with the
+    same contact look like two.
+
+    The country code and trunk prefix are stripped rather than rejected: a form
+    that refuses `+91…` is a form people retype in irritation.
+    """
+    digits = ''.join(ch for ch in (phone or '') if ch.isdigit())
+    if len(digits) == 12 and digits.startswith('91'):
+        digits = digits[2:]          # +91 98765 43210
+    elif len(digits) == 11 and digits.startswith('0'):
+        digits = digits[1:]          # 098765 43210
+    return digits or None
+
+
 def phone_problem(phone):
     """Return a human-readable problem with the phone number, or None.
 
-    Deliberately loose: it strips the punctuation people type (spaces, dashes,
-    brackets, a leading +) and only insists on a plausible run of digits. The
-    aim is to catch typos and empty submissions, not to police formats — a
-    farmer whose number does not fit a strict Indian pattern still needs to be
-    reachable when an order is on its way.
+    Ten digits, starting 6–9 — the format every Indian mobile has. This used to
+    accept any 7-to-15 digit run on the reasoning that a farmer with an unusual
+    number still has to be reachable. In practice the loose rule let typos
+    through, and under cash on delivery an unreachable number is a driver
+    standing outside a building with produce and no way to be let in.
+
+    Landlines are not accepted, deliberately: this number is used to reach
+    somebody *during* a delivery, and a landline is the one phone they will not
+    be near.
     """
-    digits = ''.join(ch for ch in (phone or '') if ch.isdigit())
+    if not (phone or '').strip():
+        return 'Phone number is required'
+
+    digits = normalise_phone(phone)
     if not digits:
         return 'Phone number is required'
-    if len(digits) < 7:
-        return 'That phone number looks too short'
-    if len(digits) > 15:
-        # E.164 caps at 15 digits including the country code.
-        return 'That phone number looks too long'
+    if len(digits) != 10:
+        return 'Enter a 10-digit mobile number'
+    if digits[0] not in '6789':
+        # India's mobile series. A number starting 0–5 is a landline, a short
+        # code, or a digit dropped from the front.
+        return 'An Indian mobile number starts with 6, 7, 8 or 9'
+    return None
+
+
+# Deliberately not RFC 5322. The full grammar accepts quoted strings, comments
+# and bare IP literals — none of which anyone types into a signup form, and all
+# of which make the pattern unreadable. This accepts what real addresses look
+# like and rejects the rest.
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+# Typos that silently send a password-reset into the void. The cost of getting
+# one wrong is a signup refused for a real address, so this stays short and only
+# lists domains where the misspelling has no legitimate twin.
+_EMAIL_TYPOS = {
+    'gmial.com': 'gmail.com', 'gmai.com': 'gmail.com', 'gmail.co': 'gmail.com',
+    'gnail.com': 'gmail.com', 'gmail.con': 'gmail.com', 'yahooo.com': 'yahoo.com',
+    'yaho.com': 'yahoo.com', 'hotmial.com': 'hotmail.com', 'outlok.com': 'outlook.com',
+    'rediffmial.com': 'rediffmail.com',
+}
+
+
+def email_problem(email):
+    """Return a human-readable problem with the email address, or None.
+
+    Format only. Whether the mailbox exists cannot be known without sending to
+    it, and this app has no verification step — so the honest goal is catching
+    the address that was mistyped, not proving the address is real.
+
+    Case is not normalised here; the caller stores whatever it was given. That
+    is deliberate — the local part of an address is case-sensitive per the spec,
+    even though every provider anyone uses treats it otherwise.
+    """
+    value = (email or '').strip()
+    if not value:
+        return 'Email is required'
+    if len(value) > 254:
+        # The maximum length of a forward path in SMTP.
+        return 'That email address is too long'
+    if ' ' in value:
+        return 'An email address cannot contain spaces'
+    if value.count('@') != 1:
+        return 'Enter a valid email address, like name@example.com'
+    if not _EMAIL_RE.match(value):
+        return 'Enter a valid email address, like name@example.com'
+
+    domain = value.rsplit('@', 1)[1].lower()
+    if domain in _EMAIL_TYPOS:
+        return f'Did you mean {_EMAIL_TYPOS[domain]}? Please check the address'
+    if domain.endswith('.'):
+        return 'Enter a valid email address, like name@example.com'
+    return None
+
+
+# India Post PIN codes. The first digit is the postal region and runs 1–8;
+# 0 and 9 are not allocated, which makes a leading zero the single most common
+# way a mistyped PIN slips through a length check.
+_PIN_RE = re.compile(r'^[1-8]\d{5}$')
+
+# The states and union territories India Post delivers to. Kept as a set rather
+# than free text so "Kerela" and "Tamilnadu" are caught at signup instead of at
+# a doorstep.
+INDIAN_STATES = {
+    'andaman and nicobar islands', 'andhra pradesh', 'arunachal pradesh', 'assam',
+    'bihar', 'chandigarh', 'chhattisgarh', 'dadra and nagar haveli and daman and diu',
+    'delhi', 'goa', 'gujarat', 'haryana', 'himachal pradesh', 'jammu and kashmir',
+    'jharkhand', 'karnataka', 'kerala', 'ladakh', 'lakshadweep', 'madhya pradesh',
+    'maharashtra', 'manipur', 'meghalaya', 'mizoram', 'nagaland', 'odisha',
+    'puducherry', 'punjab', 'rajasthan', 'sikkim', 'tamil nadu', 'telangana',
+    'tripura', 'uttar pradesh', 'uttarakhand', 'west bengal',
+}
+
+# Common spellings and old names that mean a real state.
+_STATE_ALIASES = {
+    'orissa': 'odisha', 'pondicherry': 'puducherry', 'nct of delhi': 'delhi',
+    'new delhi': 'delhi', 'tamilnadu': 'tamil nadu', 'kerela': 'kerala',
+    'karnatka': 'karnataka', 'maharastra': 'maharashtra', 'j&k': 'jammu and kashmir',
+    'uttaranchal': 'uttarakhand', 'bangalore': 'karnataka',
+}
+
+
+def normalise_state(state):
+    """The canonical state name, or None if it is not one we deliver to."""
+    value = re.sub(r'\s+', ' ', (state or '').strip().lower())
+    value = _STATE_ALIASES.get(value, value)
+    return value if value in INDIAN_STATES else None
+
+
+def postal_code_problem(postal_code):
+    """Return a human-readable problem with the PIN code, or None."""
+    digits = ''.join(ch for ch in (postal_code or '') if ch.isdigit())
+    if not digits:
+        return 'PIN code is required'
+    if len(digits) != 6:
+        return 'A PIN code is 6 digits'
+    if not _PIN_RE.match(digits):
+        return 'That PIN code does not exist — Indian PIN codes start 1 to 8'
+    return None
+
+
+def state_problem(state):
+    """Return a human-readable problem with the state, or None."""
+    if not (state or '').strip():
+        return 'State is required'
+    if normalise_state(state) is None:
+        return f'"{state.strip()}" is not a state we recognise'
+    return None
+
+
+# First digit of the PIN -> the states that digit covers. India Post allocates
+# the leading digit by region, so a Kerala address with a PIN starting 1 is a
+# transposition or a copy-paste from somewhere else.
+_PIN_REGIONS = {
+    '1': {'delhi', 'haryana', 'himachal pradesh', 'jammu and kashmir', 'ladakh', 'punjab', 'chandigarh'},
+    '2': {'uttar pradesh', 'uttarakhand'},
+    '3': {'rajasthan', 'gujarat', 'dadra and nagar haveli and daman and diu'},
+    '4': {'chhattisgarh', 'goa', 'madhya pradesh', 'maharashtra'},
+    '5': {'andhra pradesh', 'karnataka', 'telangana'},
+    '6': {'kerala', 'lakshadweep', 'puducherry', 'tamil nadu'},
+    '7': {'andaman and nicobar islands', 'arunachal pradesh', 'assam', 'manipur',
+          'meghalaya', 'mizoram', 'nagaland', 'odisha', 'sikkim', 'tripura', 'west bengal'},
+    '8': {'bihar', 'jharkhand'},
+}
+
+
+def address_problem(state, postal_code):
+    """Check the state and PIN separately, then check they agree.
+
+    The cross-check is the one that earns its place: each field can be
+    individually valid and still describe nowhere. Under cash on delivery a
+    wrong address is a wasted trip with produce in the van, so it is worth
+    refusing at the point of entry rather than discovering at the door.
+
+    Deliberately a warning-free pass when the region is unknown — India Post
+    reassigns ranges, and refusing a real address is worse than accepting an
+    odd one.
+    """
+    problem = state_problem(state)
+    if problem:
+        return problem
+    problem = postal_code_problem(postal_code)
+    if problem:
+        return problem
+
+    canonical = normalise_state(state)
+    digits = ''.join(ch for ch in postal_code if ch.isdigit())
+    region = _PIN_REGIONS.get(digits[0])
+    if region and canonical not in region:
+        return (f'PIN {digits} is not in {state.strip()} — '
+                'please check the PIN code and state match')
     return None
 
 

@@ -95,6 +95,22 @@ class Payment(db.Model):
     refunded_at = db.Column(db.DateTime)
     refund_reason = db.Column(db.String(255))
 
+    # ── What the farmer was handed, at pickup ──
+    #
+    # F2H pays the farmer their share in cash when it collects the produce, so
+    # the payment to the farmer happens *before* the payment from the customer.
+    # These three columns are the whole record of it — there is no wallet
+    # balance behind them any more.
+    #
+    # `farmer_paid_amount` is stored rather than read back off `farmer_amount`
+    # because the two can legitimately differ: a short pickup, an agreed
+    # deduction for quality. What was actually handed over is the fact worth
+    # keeping.
+    farmer_paid_at = db.Column(db.DateTime)
+    farmer_paid_amount = db.Column(db.Numeric(10, 2))
+    farmer_paid_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'))
+    farmer_paid_note = db.Column(db.String(255))
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     paid_at = db.Column(db.DateTime)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -102,6 +118,7 @@ class Payment(db.Model):
     customer = db.relationship('User', foreign_keys=[customer_id])
     farmer = db.relationship('User', foreign_keys=[farmer_id])
     collector = db.relationship('User', foreign_keys=[collected_by])
+    farmer_payer = db.relationship('User', foreign_keys=[farmer_paid_by])
     request = db.relationship('PurchaseRequest', foreign_keys=[request_id])
     family_pack_order = db.relationship('FamilyPackOrder', foreign_keys=[family_pack_order_id])
 
@@ -137,6 +154,13 @@ class Payment(db.Model):
             'refunded_amount': float(self.refunded_amount),
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'paid_at': self.paid_at.isoformat() if self.paid_at else None,
+            # What the farmer got, and when. `farmer_paid_at` being null is how
+            # every screen decides whether to say "due at pickup" or "paid".
+            'farmer_paid_at': self.farmer_paid_at.isoformat() if self.farmer_paid_at else None,
+            'farmer_paid_amount': (float(self.farmer_paid_amount)
+                                   if self.farmer_paid_amount is not None else None),
+            'farmer_paid_by': self.farmer_paid_by,
+            'farmer_paid_note': self.farmer_paid_note,
         }
 
 

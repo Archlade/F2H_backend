@@ -56,13 +56,17 @@ def list_subscriptions():
 @jwt_required()
 def get_one(subscription_id):
     user_id = int(get_jwt_identity())
+    _, role = current_user_role()
     try:
-        sub = get_subscription(subscription_id, user_id)
+        sub = get_subscription(subscription_id, user_id, actor_role=role)
     except PermissionError as e:
         return jsonify({'error': str(e)}), 403
     if not sub:
         return jsonify({'error': 'Weekly basket not found'}), 404
-    return jsonify(sub.to_dict(include_deliveries=True)), 200
+    # Suppliers and their phone numbers are admin-only — a customer opening
+    # their own basket has no business seeing every farm's contact details.
+    return jsonify(sub.to_dict(include_deliveries=True,
+                               include_suppliers=(role == 'admin'))), 200
 
 
 @family_pack_subscriptions_bp.route('/<int:subscription_id>', methods=['PUT'])

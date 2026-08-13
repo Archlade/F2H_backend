@@ -92,6 +92,18 @@ def ensure_for_order(order):
         return existing
 
     rate = current_app.config.get('PLATFORM_COMMISSION_RATE', 20)
+
+    # A basket F2H sells itself pays no farmer share.
+    #
+    # Weekly baskets are sold by the platform, so the "farmer" on the order is
+    # F2H's own selling account. Splitting 80/20 there would record F2H owing
+    # itself 80% of every basket — which the admin orders screen would then
+    # display as "pay the farmer ₹X at pickup", against an account that is not a
+    # farmer and is standing at no gate. The growers who supplied the produce
+    # are paid separately; that is the trade this model makes.
+    if _is_platform_sale(order):
+        rate = 100
+
     commission, farmer_share = Payment.split(amount, rate)
 
     payment = existing or Payment(
@@ -110,6 +122,18 @@ def ensure_for_order(order):
     # No commit. The caller owns the transaction so the confirmation and the
     # amount it implies land together or not at all.
     return payment
+
+
+def _is_platform_sale(order) -> bool:
+    """True when F2H itself is the seller — a weekly basket it sources and sells.
+
+    Never raises. A misconfigured platform seller must not stop an ordinary
+    farm order from having its payment created; it only means this one check
+    answers "no", and a real farm order is unaffected either way.
+    """
+    from .platform_seller import platform_seller_or_none
+    seller = platform_seller_or_none()
+    return seller is not None and getattr(order, 'farmer_id', None) == seller.id
 
 
 def amount_due(order):
@@ -191,6 +215,82 @@ def is_collected(order) -> bool:
     """Has the money for this order actually arrived?"""
     payment = _payment_for(order)
     return payment is not None and payment.status == 'paid'
+
+
+# ── Paying the farmer ─────────────────────────────────────────────────────────
+#
+# F2H hands the farmer their share in cash at the farm gate when it collects the
+# produce. That is *earlier* than the customer pays, which is the one thing to
+# hold on to about this file: the platform is out of pocket between pickup and
+# the door, and that gap is deliberate — it is what the farmer is spared.
+
+def farmer_amount_due(order):
+    """What to hand the farmer at pickup, as a Decimal.
+
+    The frozen share from the payment row, which was fixed at confirmation.
+    Falls back to zero rather than guessing: an order with no payment row was
+    never confirmed, so nothing is owed on it yet.
+    """
+    payment = _payment_for(order)
+    if payment is None:
+        return money(0)
+    return money(payment.farmer_amount)
+
+
+def mark_farmer_paid(payment: Payment, paid_by_id, amount=None, note=None):
+    """Record cash handed to the farmer at pickup. Idempotent.
+
+    `amount` defaults to the frozen `farmer_amount` but can be less — a short
+    pickup, or an agreed deduction for quality. It is written down rather than
+    recomputed later, because what actually changed hands at a farm gate is not
+    recoverable from anything else.
+
+    Idempotent for the same reason `mark_collected` is: a double-tapped button
+    must not read as a second payment. There is no ledger behind this any more,
+    so a duplicate would not merely double a balance — it would be the only
+    record, and it would be wrong.
+    """
+    if payment is None:
+        return None
+    if payment.farmer_paid_at is not None:
+        return payment
+
+    payment.farmer_paid_amount = money(payment.farmer_amount if amount is None else amount)
+    payment.farmer_paid_at = datetime.utcnow()
+    payment.farmer_paid_by = paid_by_id
+    payment.farmer_paid_note = (note or '').strip()[:255] or None
+
+    logger.info('Farmer %s paid ₹%s in cash at pickup for %s',
+                payment.farmer_id, payment.farmer_paid_amount, order_label(payment))
+    return payment
+
+
+def is_farmer_paid(order) -> bool:
+    payment = _payment_for(order)
+    return payment is not None and payment.farmer_paid_at is not None
+
+
+def farmer_payment_summary(order):
+    """The farmer's side of an order's money, for a screen. None if not confirmed.
+
+    Deliberately small and deliberately opt-in — callers ask for it per order
+    rather than it riding on every `to_dict`, because it costs a lookup and most
+    screens never show it.
+
+        due    what will be handed over at pickup
+        paid   what actually was, once it has been
+    """
+    payment = _payment_for(order)
+    if payment is None:
+        return None
+    return {
+        'due': float(money(payment.farmer_amount)),
+        'paid_at': payment.farmer_paid_at.isoformat() if payment.farmer_paid_at else None,
+        'paid_amount': (float(payment.farmer_paid_amount)
+                        if payment.farmer_paid_amount is not None else None),
+        'paid_by_name': payment.farmer_payer.full_name if payment.farmer_payer else None,
+        'note': payment.farmer_paid_note,
+    }
 
 
 # ── Order plumbing ────────────────────────────────────────────────────────────

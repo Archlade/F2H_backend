@@ -210,6 +210,14 @@ def _send(user_id, title, body, data):
             .limit(500)
             .all())
     if not rows:
+        # Logged rather than returned quietly. A user with no registered device
+        # is the most common reason "push doesn't work", and it looks identical
+        # from the outside to a broken key: the notification row is created, the
+        # in-app list updates, and the phone stays silent. Without this line
+        # there is nothing anywhere that says the send had no destination.
+        logger.info('No device token for user %s — nothing to push to. The app '
+                    'registers one at sign-in via POST /api/devices; an APK '
+                    'built without google-services.json never will.', user_id)
         return 0
 
     tokens = [row.token for row in rows]

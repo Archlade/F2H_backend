@@ -22,3 +22,4 @@ from .family_pack import (FamilyPack, FamilyPackItem, FamilyPackOrder,
                           FamilyPackSubscription, FamilyPackSubscriptionItem)
 from .coupon import Coupon, CouponRedemption
 
+from .cart import CartItem

@@ -8,6 +8,7 @@ from ..models import (User, Role, FarmerProfile, Product, PurchaseRequest, Revie
 
 from ..extensions import db
 from datetime import datetime
+from urllib.parse import quote
 from sqlalchemy import func
 from ..utils.validators import clamp_page
 
@@ -243,6 +244,52 @@ def toggle_feature_product(product_id):
     log_audit(admin_id, 'feature_product', 'product', product_id)
     db.session.commit()
     return jsonify({'featured': featured}), 200
+
+
+@admin_bp.route('/products/<int:product_id>/basket', methods=['PATCH'])
+@jwt_required()
+@admin_required
+def toggle_basket_product(product_id):
+    """Add or remove a product from the weekly basket catalogue.
+
+    Adding is inert — it only makes the product appear for anyone building a
+    basket. **Removing is not.** Every live basket containing it is edited and
+    those customers are notified, because the alternative is F2H promising a
+    weekly item it has stopped sourcing.
+
+    The response reports how many baskets changed so the admin screen can say
+    so, rather than the admin discovering it from support messages.
+    """
+    from ..services.family_pack_subscription_service import (
+        notify_product_removed, remove_product_from_baskets)
+
+    admin_id = _get_admin_id()
+    product = Product.query.get_or_404(product_id)
+
+    affected = []
+    if product.basket_eligible:
+        product.basket_eligible = False
+        # Same transaction as the flag: a product delisted but still sitting in
+        # baskets is the one state that must not be reachable.
+        affected = remove_product_from_baskets(product)
+    else:
+        product.basket_eligible = True
+
+    log_audit(admin_id, 'basket_eligible_product', 'product', product_id,
+              new_data={'basket_eligible': product.basket_eligible,
+                        'baskets_affected': len(affected)})
+    db.session.commit()
+
+    # After the commit — a notification for a change that rolled back is worse
+    # than a late one.
+    if affected:
+        notify_product_removed(affected, product)
+
+    return jsonify({
+        'basket_eligible': product.basket_eligible,
+        'baskets_affected': len(affected),
+        'baskets_paused': sum(1 for _, emptied in affected if emptied),
+    }), 200
 
 
 # ── Featured Content ───────────────────────────────────────────────────────────
@@ -537,6 +584,168 @@ def approve_family_pack(pack_id):
     return jsonify({'is_approved': pack.is_approved}), 200
 
 
+def _contact(user):
+    """Name and phone, for an admin who needs to ring somebody.
+
+    Deliberately not part of any order's normal `to_dict`. A customer must not
+    receive the farmer's number in an API response and vice versa — this is
+    admin-only, which is why it lives here rather than on the model.
+    """
+    if user is None:
+        return None
+    return {'id': user.id, 'name': user.full_name, 'phone': user.phone}
+
+
+def _place(address):
+    """Where to go, and a link that will actually open a map.
+
+    Coordinates when the address has them, falling back to the written address.
+    Built server-side so both the app and the web panel get the same link, and
+    so a missing address is None rather than a URL that opens an empty map.
+    """
+    if address is None:
+        return None
+
+    lat = float(address.latitude) if address.latitude is not None else None
+    lon = float(address.longitude) if address.longitude is not None else None
+    written = ', '.join(p for p in (
+        getattr(address, 'address_line1', None),
+        getattr(address, 'city', None),
+        getattr(address, 'postal_code', None),
+    ) if p)
+
+    if lat is not None and lon is not None:
+        query = f'{lat},{lon}'
+    elif written:
+        query = written
+    else:
+        return None
+
+    return {
+        'address': written or None,
+        'latitude': lat,
+        'longitude': lon,
+        # The universal form — opens the Maps app on Android and iOS, and the
+        # website on desktop, without needing platform-specific URLs.
+        'maps_url': f'https://www.google.com/maps/search/?api=1&query={quote(query)}',
+    }
+
+
+def _farmer_payment_map(requests_, pack_orders):
+    """{(order_type, id): farmer payment facts} for a page of orders, in 2 queries.
+
+    Farmers are paid in cash at stock pickup, so "who still needs paying" is the
+    question this screen answers. Looking it up per row would be a query per
+    order; both sets are fetched by id instead.
+    """
+    from ..models.payment import Payment
+
+    out = {}
+    req_ids = [r.id for r in requests_]
+    pack_ids = [o.id for o in pack_orders]
+
+    def pack(p):
+        return {
+            'due': float(p.farmer_amount or 0),
+            'paid_at': p.farmer_paid_at.isoformat() if p.farmer_paid_at else None,
+            'paid_amount': (float(p.farmer_paid_amount)
+                            if p.farmer_paid_amount is not None else None),
+            'note': p.farmer_paid_note,
+        }
+
+    if req_ids:
+        for p in Payment.query.filter(Payment.request_id.in_(req_ids)).all():
+            out[('request', p.request_id)] = pack(p)
+    if pack_ids:
+        for p in Payment.query.filter(Payment.family_pack_order_id.in_(pack_ids)).all():
+            out[('pack-order', p.family_pack_order_id)] = pack(p)
+    return out
+
+
+@admin_bp.route('/orders', methods=['GET'])
+@jwt_required()
+@admin_required
+def list_all_orders():
+    """Every order in the platform, both kinds, newest first.
+
+    Purchase requests and family pack orders live in separate tables with no
+    shared key, so they are merged in Python rather than in SQL. That is fine at
+    the volumes an admin browses and keeps the two models independent — but it
+    does mean the whole result set is read before slicing, so the page size is
+    capped rather than trusted.
+
+    Carries the contact numbers and a map link for each side, which is the point
+    of the screen: an admin chasing a late delivery needs to phone someone and
+    know where they are going.
+    """
+    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'),
+                                max_per_page=100)
+    status = request.args.get('status')
+
+    rows = []
+
+    req_query = PurchaseRequest.query
+    if status:
+        req_query = req_query.filter_by(status=status)
+    requests_ = req_query.order_by(PurchaseRequest.created_at.desc()).limit(500).all()
+
+    pack_query = FamilyPackOrder.query
+    if status:
+        pack_query = pack_query.filter_by(status=status)
+    pack_orders = pack_query.order_by(FamilyPackOrder.created_at.desc()).limit(500).all()
+
+    # Farmer payment facts for every row, in two queries rather than a thousand.
+    # This screen is where an admin decides who still needs paying at pickup, so
+    # it cannot be the one place that omits it — but looking each one up in the
+    # loop would issue a query per order, twice over.
+    farmer_pay = _farmer_payment_map(requests_, pack_orders)
+
+    for r in requests_:
+        rows.append({
+            'order_type': 'request',
+            'id': r.id,
+            'title': r.product.name if r.product else f'Request #{r.id}',
+            'quantity': float(r.quantity),
+            'unit': r.product.unit if r.product else None,
+            'status': r.status,
+            'payment_status': r.payment_status,
+            'total_price': float(r.total_price),
+            'purchase_mode': r.purchase_mode,
+            'created_at': r.created_at.isoformat() if r.created_at else None,
+            'customer': _contact(r.customer),
+            'farmer': _contact(r.farmer),
+            'delivery': _place(r.delivery_address),
+            'farmer_payment': farmer_pay.get(('request', r.id)),
+        })
+
+    for o in pack_orders:
+        rows.append({
+            'order_type': 'pack-order',
+            'id': o.id,
+            'title': (o.pack.name if o.pack else None) or f'Weekly basket #{o.id}',
+            'quantity': None,
+            'unit': None,
+            'status': o.status,
+            'payment_status': o.payment_status,
+            'total_price': float(o.total_price),
+            'purchase_mode': o.purchase_mode,
+            'created_at': o.created_at.isoformat() if o.created_at else None,
+            'customer': _contact(o.customer),
+            'farmer': _contact(o.farmer),
+            'delivery': _place(o.delivery_address),
+            'farmer_payment': farmer_pay.get(('pack-order', o.id)),
+        })
+
+    # Sorted on the ISO string, which orders correctly because the format is
+    # fixed-width and zero-padded. Nulls last so a row with no timestamp does
+    # not sort to the top.
+    rows.sort(key=lambda r: r['created_at'] or '', reverse=True)
+
+    total = len(rows)
+    start = (page - 1) * per_page
+    return jsonify(paginate_response(rows[start:start + per_page], total, page, per_page)), 200
+
+
 @admin_bp.route('/family-pack-subscriptions', methods=['GET'])
 @jwt_required()
 @admin_required
@@ -562,9 +771,12 @@ def list_admin_family_pack_subscriptions():
             .offset((page - 1) * per_page).limit(per_page).all())
 
     payload = paginate_response(
-        # Items are the whole basket and would dominate a list response; the
-        # detail screen fetches them when one is opened.
-        [s.to_dict(include_items=False) for s in subs], total, page, per_page)
+        # Items and suppliers both included: this screen is where an admin
+        # decides whether to approve a basket, and that decision is "can we
+        # actually source this" — which needs the items and the farms they come
+        # from. Fetching them on open instead would mean opening every one.
+        [s.to_dict(include_items=True, include_suppliers=True) for s in subs],
+        total, page, per_page)
     payload['counts'] = {
         state: db.session.query(func.count(FamilyPackSubscription.id))
         .filter(FamilyPackSubscription.status == state).scalar()

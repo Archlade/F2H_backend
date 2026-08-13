@@ -103,13 +103,18 @@ class FamilyPackOrder(db.Model):
     purchase_mode = db.Column(db.String(20), default='delivery', nullable=False)
     status = db.Column(
         db.Enum('pending', 'admin_review', 'accepted', 'rejected', 'chat_active',
-                'confirmed', 'preparing', 'ready_for_pickup', 'out_for_delivery', 'completed', 'cancelled'),
+                'confirmed', 'preparing', 'picked_up', 'ready_for_pickup',
+                'out_for_delivery', 'completed', 'cancelled'),
         default='pending'
     )
     delivery_address_id = db.Column(db.Integer, db.ForeignKey('addresses.id', ondelete='SET NULL'))
     delivery_notes = db.Column(db.Text)
     customer_message = db.Column(db.Text)
     rejection_reason = db.Column(db.Text)
+    # Why a generated delivery is sitting in admin_review rather than confirmed
+    # — normally the items nobody had in stock that week. Without it the queue
+    # shows orders needing attention and no reason why.
+    hold_reason = db.Column(db.String(500))
     cancellation_reason = db.Column(db.Text)
     cancelled_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'))
     # Whether this order's items have been taken off the farmer's listings.
@@ -168,6 +173,7 @@ class FamilyPackOrder(db.Model):
             'delivery_notes': self.delivery_notes,
             'customer_message': self.customer_message,
             'rejection_reason': self.rejection_reason,
+            'hold_reason': self.hold_reason,
             'cancellation_reason': self.cancellation_reason,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
@@ -210,16 +216,26 @@ WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday',
 
 
 class FamilyPackSubscription(db.Model):
-    """A customer's standing weekly basket from one farm.
+    """A customer's standing weekly basket, sold by F2H.
 
-    The customer chooses the products and a weekday; one confirmed delivery is
-    generated automatically each week while the subscription is active.
+    The customer chooses products from the whole catalogue and a weekday, an
+    admin approves it, and one delivery is generated automatically each week
+    while it is active.
+
+    A basket is deliberately not tied to a farm. A household wants tomatoes from
+    whoever has good tomatoes this week, and which farms supply each item is a
+    sourcing question F2H answers — not a constraint the customer has to work
+    within when building their weekly shop.
     """
     __tablename__ = 'family_pack_subscriptions'
 
     id = db.Column(db.Integer, primary_key=True)
     customer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    farmer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    # Nullable, and NULL on everything created since baskets went catalogue-wide.
+    # Older rows keep the farm they were built against and the generator still
+    # honours it, so a subscription in flight keeps running across the change
+    # rather than breaking on it.
+    farmer_id = db.Column(db.Integer, db.ForeignKey('users.id'))
     delivery_address_id = db.Column(db.Integer, db.ForeignKey('addresses.id', ondelete='SET NULL'))
     # 0 = Monday ... 6 = Sunday, matching datetime.date.weekday()
     delivery_weekday = db.Column(db.Integer, nullable=False)
@@ -229,6 +245,11 @@ class FamilyPackSubscription(db.Model):
     start_date = db.Column(db.Date, nullable=False)
     paused_until = db.Column(db.Date)
     last_generated_date = db.Column(db.Date)
+    # The delivery date this basket was last reminded about. Not a timestamp:
+    # the question the reminder job asks is "have I already warned them about
+    # *this* delivery", and a date answers it idempotently however many times
+    # the job runs.
+    last_reminded_for = db.Column(db.Date)
     # A coupon offered at signup is redeemed immediately — so it is genuinely
     # spent and cannot be double-used — and the stored discount is applied to
     # the first delivery this subscription generates.
@@ -266,7 +287,48 @@ class FamilyPackSubscription(db.Model):
         offset = (self.delivery_weekday - base.weekday()) % 7
         return base + timedelta(days=offset)
 
-    def to_dict(self, include_items=True, include_users=True, include_deliveries=False):
+    @property
+    def suppliers(self):
+        """Which farms this basket's items come from, and what to buy from each.
+
+        The customer builds from the whole catalogue and F2H sells the basket,
+        so nothing else in the data model records who actually grows what is in
+        it. Without this an admin approving a basket can see the items but has
+        no idea who to ring — which is the first thing they need to do.
+
+        Grouped rather than listed per item, because a sourcing round is
+        organised by farm, not by vegetable.
+        """
+        by_farm = {}
+        for item in self.items:
+            product = item.product
+            if product is None:
+                continue
+            farmer = product.farmer
+            key = product.farmer_id
+            entry = by_farm.setdefault(key, {
+                'farmer_id': key,
+                'farm_name': None,
+                'phone': None,
+                'items': [],
+                'subtotal': 0.0,
+            })
+            if entry['farm_name'] is None and farmer is not None:
+                profile = getattr(farmer, 'farmer_profile', None)
+                entry['farm_name'] = (profile.farm_name if profile else None) or farmer.full_name
+                entry['phone'] = farmer.phone
+            entry['items'].append({
+                'product_id': product.id,
+                'name': product.name,
+                'quantity': float(item.quantity),
+                'unit': item.unit,
+                'line_total': item.line_total,
+            })
+            entry['subtotal'] = round(entry['subtotal'] + item.line_total, 2)
+        return sorted(by_farm.values(), key=lambda e: (e['farm_name'] or '').lower())
+
+    def to_dict(self, include_items=True, include_users=True, include_deliveries=False,
+                include_suppliers=False):
         data = {
             'id': self.id,
             'customer_id': self.customer_id,
@@ -296,6 +358,10 @@ class FamilyPackSubscription(db.Model):
         }
         if include_items:
             data['items'] = [i.to_dict() for i in self.items]
+        if include_suppliers:
+            # Admin-only. Carries farm phone numbers, so it is opt-in and never
+            # rides on a customer-facing response.
+            data['suppliers'] = self.suppliers
         if include_users:
             if self.customer:
                 data['customer'] = {
