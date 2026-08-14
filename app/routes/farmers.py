@@ -159,3 +159,90 @@ def dashboard_stats():
         'completed_orders': completed,
         'total_revenue': float(total_revenue),
     }), 200
+
+
+@farmers_bp.route('/dashboard/analytics', methods=['GET'])
+@jwt_required()
+@farmer_required
+def dashboard_analytics():
+    """Real numbers for the farmer's charts.
+
+    This endpoint exists because the analytics page had none: it rendered a
+    hardcoded Jan–Jun line and a bar chart of Tomatoes/Potatoes/Carrots/Apples,
+    identical for every farmer, behind a fake half-second spinner. A chart of
+    invented numbers is worse than no chart — it is a number somebody might
+    plan around.
+
+    Two series, both from this farmer's own orders:
+
+      monthly      order count and revenue, last 6 calendar months
+      top_products the five products with the most orders
+
+    Revenue counts completed orders only, matching the total on the dashboard.
+    An order that was placed but never delivered is not money.
+    """
+    # Imported here, not at module scope, matching dashboard_stats above —
+    # `func` is not a module-level name in this file.
+    from datetime import date
+
+    from sqlalchemy import func
+
+    from ..models import Product, PurchaseRequest
+
+    user_id = int(get_jwt_identity())
+    today = date.today()
+
+    # Six buckets, oldest first, including months with nothing in them — a gap
+    # in a trend line is information, and skipping empty months would draw a
+    # flat line through a month the farmer sold nothing.
+    months = []
+    y, m = today.year, today.month
+    for _ in range(6):
+        months.append((y, m))
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    months.reverse()
+
+    start = date(months[0][0], months[0][1], 1)
+
+    rows = (db.session.query(
+                func.year(PurchaseRequest.created_at).label('y'),
+                func.month(PurchaseRequest.created_at).label('m'),
+                func.count(PurchaseRequest.id).label('orders'),
+                func.sum(db.case((PurchaseRequest.status == 'completed',
+                                  PurchaseRequest.total_price), else_=0)).label('revenue'))
+            .filter(PurchaseRequest.farmer_id == user_id,
+                    PurchaseRequest.created_at >= start)
+            .group_by('y', 'm').all())
+    by_month = {(r.y, r.m): r for r in rows}
+
+    LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    monthly = []
+    for (yy, mm) in months:
+        r = by_month.get((yy, mm))
+        monthly.append({
+            'name': LABELS[mm - 1],
+            'year': yy,
+            'orders': int(r.orders) if r else 0,
+            'revenue': float(r.revenue or 0) if r else 0.0,
+        })
+
+    top = (db.session.query(
+               Product.name,
+               func.count(PurchaseRequest.id).label('orders'),
+               func.sum(db.case((PurchaseRequest.status == 'completed',
+                                 PurchaseRequest.total_price), else_=0)).label('revenue'))
+           .join(PurchaseRequest, PurchaseRequest.product_id == Product.id)
+           .filter(PurchaseRequest.farmer_id == user_id)
+           .group_by(Product.id, Product.name)
+           .order_by(func.count(PurchaseRequest.id).desc())
+           .limit(5).all())
+
+    return jsonify({
+        'monthly': monthly,
+        'top_products': [
+            {'name': n, 'orders': int(o), 'revenue': float(rv or 0)} for n, o, rv in top
+        ],
+    }), 200

@@ -113,7 +113,43 @@ def list_products():
 
     results, total = get_products(filters, customer_lat, customer_lon, page, per_page)
     items = [r['product'].to_dict(distance=r['distance']) for r in results]
+
+    # Which of these the caller has already favourited.
+    #
+    # Without it the heart on every card renders empty regardless of the truth,
+    # and tapping one on a product you already like *removes* it while saying
+    # "Added to favorites". One query for the page, not one per card.
+    _annotate_favourites(items)
+
     return jsonify(paginate_response(items, total, page, per_page)), 200
+
+
+def _annotate_favourites(items):
+    """Set `is_favorited` on each product dict, for the signed-in caller.
+
+    Silent for anonymous visitors — they have no favourites, and a failure to
+    resolve the token must not take down a public product listing.
+    """
+    from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
+    from ..models import Favorite
+
+    try:
+        verify_jwt_in_request(optional=True)
+        uid = get_jwt_identity()
+        user_id = int(uid) if uid else None
+    except Exception:
+        user_id = None
+
+    if not user_id or not items:
+        for it in items:
+            it['is_favorited'] = False
+        return
+
+    ids = [it['id'] for it in items]
+    liked = {f.product_id for f in Favorite.query.filter(
+        Favorite.user_id == user_id, Favorite.product_id.in_(ids)).all()}
+    for it in items:
+        it['is_favorited'] = it['id'] in liked
 
 
 @products_bp.route('/<int:product_id>', methods=['GET'])

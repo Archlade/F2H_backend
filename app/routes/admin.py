@@ -4,7 +4,7 @@ from ..utils.decorators import admin_required
 from ..utils.helpers import paginate_response, log_audit
 from ..models import (User, Role, FarmerProfile, Product, PurchaseRequest, Review, Report,
                        FeaturedFarmer, FeaturedProduct, HomepageSection, Announcement, Category,
-                       FamilyPack, FamilyPackOrder, FamilyPackSubscription)
+                       FamilyPackOrder, FamilyPackSubscription)
 
 from ..extensions import db
 from datetime import datetime
@@ -63,8 +63,11 @@ def dashboard():
                                User.deleted_at.is_(None)).count())
     pending_products = Product.query.filter(Product.is_approved.is_(False),
                                             Product.deleted_at.is_(None)).count()
-    pending_packs = FamilyPack.query.filter(FamilyPack.is_approved.is_(False),
-                                            FamilyPack.deleted_at.is_(None)).count()
+    # Weekly baskets waiting on an admin, not curated packs — that feature is
+    # gone. This is the queue somebody actually has to work: a basket sits at
+    # 'pending' doing nothing until it is approved.
+    pending_baskets = FamilyPackSubscription.query.filter(
+        FamilyPackSubscription.status == 'pending').count()
     pending_reviews = Review.query.filter(Review.is_approved.is_(False)).count()
 
     # total_price is already the amount charged, so discounts are accounted for.
@@ -83,7 +86,7 @@ def dashboard():
         'pending_reports': pending_reports,
         'pending_farmers': pending_farmers,
         'pending_products': pending_products,
-        'pending_packs': pending_packs,
+        'pending_baskets': pending_baskets,
         'pending_reviews': pending_reviews,
         'total_revenue': float(request_revenue) + float(pack_revenue),
         # Split out so the analytics page can show where the money comes from.
@@ -555,33 +558,9 @@ def analytics():
     }), 200
 
 
-# ── Family Packs Admin ─────────────────────────────────────────────────────────
-@admin_bp.route('/family-packs', methods=['GET'])
-@jwt_required()
-@admin_required
-def list_admin_family_packs():
-    page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
-    search = request.args.get('q', '').strip()
-
-    query = FamilyPack.query.filter(FamilyPack.deleted_at.is_(None))
-    if search:
-        query = query.filter(FamilyPack.name.ilike(f'%{search}%'))
-
-    total = query.count()
-    packs = query.order_by(FamilyPack.created_at.desc()).offset((page-1)*per_page).limit(per_page).all()
-    return jsonify(paginate_response([p.to_dict() for p in packs], total, page, per_page)), 200
-
-
-@admin_bp.route('/family-packs/<int:pack_id>/approve', methods=['PATCH'])
-@jwt_required()
-@admin_required
-def approve_family_pack(pack_id):
-    admin_id = _get_admin_id()
-    pack = FamilyPack.query.get_or_404(pack_id)
-    pack.is_approved = not pack.is_approved
-    log_audit(admin_id, 'approve_family_pack', 'family_pack', pack_id)
-    db.session.commit()
-    return jsonify({'is_approved': pack.is_approved}), 200
+# The curated family-pack admin screens are gone with the feature. What
+# remains under these names — family_pack_orders and
+# family_pack_subscriptions — is the weekly basket, which shares the tables.
 
 
 def _contact(user):

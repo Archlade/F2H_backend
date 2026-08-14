@@ -111,7 +111,15 @@ VALID_TRANSITIONS = {
     # Routing that through accepted → chat_active → confirmed would be three
     # clicks and a chat thread to fix a missing bunch of spinach.
     'admin_review': ['accepted', 'confirmed', 'rejected', 'cancelled'],
-    'accepted': ['chat_active', 'cancelled'],
+    # `confirmed` is reachable directly now that there is no chat.
+    #
+    # The flow used to be accepted -> chat_active -> confirmed, where
+    # `chat_active` meant "the two of them are discussing it". With the chat
+    # feature removed nothing moves an order into that state, so leaving this as
+    # `['chat_active', 'cancelled']` would strand every accepted order with no
+    # way forward. `chat_active` itself is kept as a valid state so orders
+    # already sitting in it can still be confirmed.
+    'accepted': ['chat_active', 'confirmed', 'cancelled'],
     'rejected': [],
     'chat_active': ['confirmed', 'cancelled'],
     'confirmed': ['preparing', 'cancelled'],

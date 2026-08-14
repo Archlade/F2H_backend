@@ -37,7 +37,6 @@ def create_app():
     from .routes.farmers import farmers_bp
     from .routes.customers import customers_bp
     from .routes.requests import requests_bp
-    from .routes.chat import chat_bp
     from .routes.notifications import notifications_bp
     from .routes.devices import devices_bp
     from .routes.reviews import reviews_bp
@@ -50,7 +49,6 @@ def create_app():
     from .routes.banners import banners_bp
     from .routes.payments import payments_bp
     from .routes.cron import cron_bp
-    from .routes.family_packs import family_packs_bp
     from .routes.family_pack_orders import family_pack_orders_bp
     from .routes.family_pack_subscriptions import family_pack_subscriptions_bp
     from .routes.coupons import coupons_bp
@@ -61,7 +59,10 @@ def create_app():
     app.register_blueprint(farmers_bp, url_prefix='/api/farmers')
     app.register_blueprint(customers_bp, url_prefix='/api/customers')
     app.register_blueprint(requests_bp, url_prefix='/api/requests')
-    app.register_blueprint(chat_bp, url_prefix='/api/chats')
+    # No chat blueprint. Messaging is removed from both clients; buyer and
+    # seller reach each other by phone, which is why the admin order screen
+    # carries both numbers. `routes/chat.py` and the chats/messages tables
+    # are kept — they hold real conversations that already happened.
     app.register_blueprint(notifications_bp, url_prefix='/api/notifications')
     app.register_blueprint(devices_bp, url_prefix='/api/devices')
     app.register_blueprint(reviews_bp, url_prefix='/api/reviews')
@@ -81,7 +82,10 @@ def create_app():
     # `services/wallet_service.py` are kept unregistered rather than deleted:
     # the ledger and payout tables still hold the history of every transfer
     # made under the old model, and that code is how it is read.
-    app.register_blueprint(family_packs_bp, url_prefix='/api/family-packs')
+    # No family_packs blueprint. The curated-pack feature is gone from both
+    # clients. `family_pack_orders` and `family_pack_subscriptions` stay —
+    # despite the names, those are the weekly basket, which shares the
+    # tables and is very much alive.
     app.register_blueprint(family_pack_orders_bp, url_prefix='/api/family-pack-orders')
     app.register_blueprint(family_pack_subscriptions_bp, url_prefix='/api/family-pack-subscriptions')
     app.register_blueprint(coupons_bp, url_prefix='/api/coupons')
