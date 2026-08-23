@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from ..models import Review, Product, FarmerProfile, PurchaseRequest, FamilyPackOrder
@@ -100,6 +102,46 @@ def _update_ratings(review):
             ).filter(Review.farmer_id == review.farmer_id, Review.is_approved == True).one()
             fp.rating_avg = round(float(result[0] or 0), 2)
             fp.rating_count = result[1]
+
+
+@reviews_bp.route('/<int:review_id>', methods=['DELETE'])
+@jwt_required()
+def delete_review(review_id):
+    """Withdraw a review.
+
+    Both clients have been calling this for a while — `reviewsAPI.delete` in
+    frontend/src/api/index.js and `AccountRepository.delete` in the app — against
+    a route that did not exist, so the button 404'd on the website and in the
+    app alike. The clients were right about the shape; the server was simply
+    missing.
+
+    Only the person who wrote it. An admin who wants a review gone has
+    `PATCH /admin/reviews/<id>/approve` to unpublish it, which keeps the row for
+    moderation history; deleting outright is the author's own call.
+    """
+    user_id = int(get_jwt_identity())
+    review = Review.query.get_or_404(review_id)
+
+    if review.reviewer_id != user_id:
+        # 404 rather than 403 on purpose: a 403 confirms the review exists,
+        # which is a small enumeration leak for something the caller has no
+        # business seeing either way.
+        return jsonify({'error': 'Review not found'}), 404
+
+    # `_update_ratings` recomputes a product's or farmer's average from the rows
+    # that remain, so the delete has to be flushed before it runs or the query
+    # still counts the row being removed. The ids are read off the review first
+    # for the same reason — after the flush, the instance is expired and reading
+    # `review.product_id` would go back to a row that is no longer there.
+    scope = SimpleNamespace(product_id=review.product_id, farmer_id=review.farmer_id)
+
+    db.session.delete(review)
+    db.session.flush()
+
+    _update_ratings(scope)
+    db.session.commit()
+
+    return jsonify({'message': 'Review deleted'}), 200
 
 
 @reviews_bp.route('', methods=['GET'])

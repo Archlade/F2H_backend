@@ -21,6 +21,22 @@ LEAD_DAYS = 2
 # Safety valve for a subscription that has been dormant for a long time.
 MAX_CATCH_UP = 6
 
+# Baskets are delivered at the weekend. 5 = Saturday, 6 = Sunday, matching
+# `date.weekday()` and `WEEKDAY_NAMES`.
+#
+# Every basket landing on one of two days is what makes the buying plan
+# workable: produce for a Saturday round is bought on Friday in one trip. Spread
+# across seven weekdays it is seven trips for the same volume, and under cash on
+# delivery each of those is a real cost.
+DELIVERY_WEEKDAYS = (5, 6)
+DEFAULT_DELIVERY_WEEKDAY = 5  # Saturday
+
+# Baskets created before this rule keep whatever day they were set to. Nobody's
+# delivery moves without them asking — so this is enforced on the way *in*, not
+# retrospectively, and an existing Tuesday basket goes on being a Tuesday basket
+# until its owner edits the day themselves.
+_WEEKDAY_ERROR = 'Weekly baskets are delivered on Saturday or Sunday'
+
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -105,9 +121,17 @@ def create_subscription(customer_id: int, data: dict):
     # the basket; any `farmer_id` in the request body is ignored rather than
     # honoured, so an old client cannot pin a basket to a single farm.
 
+    # Omitted means Saturday rather than an error: the day is now a choice
+    # between two, and defaulting is friendlier than refusing a request that is
+    # unambiguous in every other respect.
     weekday = data.get('delivery_weekday')
-    if weekday is None or not (0 <= int(weekday) <= 6):
-        raise ValueError('Choose a delivery day between Monday (0) and Sunday (6)')
+    weekday = DEFAULT_DELIVERY_WEEKDAY if weekday is None else weekday
+    try:
+        weekday = int(weekday)
+    except (TypeError, ValueError):
+        raise ValueError(_WEEKDAY_ERROR)
+    if weekday not in DELIVERY_WEEKDAYS:
+        raise ValueError(_WEEKDAY_ERROR)
 
     address_id = data.get('delivery_address_id')
     if not address_id:
@@ -191,9 +215,18 @@ def update_subscription(subscription_id: int, customer_id: int, data: dict):
         raise ValueError('This weekly basket has been cancelled')
 
     if 'delivery_weekday' in data:
-        weekday = int(data['delivery_weekday'])
-        if not (0 <= weekday <= 6):
-            raise ValueError('Choose a delivery day between Monday (0) and Sunday (6)')
+        try:
+            weekday = int(data['delivery_weekday'])
+        except (TypeError, ValueError):
+            raise ValueError(_WEEKDAY_ERROR)
+        # Checked only when the day is actually being changed. A basket created
+        # before this rule still holds a weekday, and editing its *items* must
+        # not fail because of a day the customer set when it was allowed — they
+        # would be unable to change anything at all until they also moved the
+        # delivery, which is not a decision to force on someone editing a
+        # shopping list.
+        if weekday != sub.delivery_weekday and weekday not in DELIVERY_WEEKDAYS:
+            raise ValueError(_WEEKDAY_ERROR)
         sub.delivery_weekday = weekday
 
     if 'delivery_address_id' in data and data['delivery_address_id']:

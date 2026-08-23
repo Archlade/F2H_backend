@@ -147,6 +147,12 @@ class Config:
     #
     # Checked against the payable total *after* any coupon, so a discount code
     # cannot be used to slip under the floor.
+    #
+    # This is the *default*, not the live figure. An admin sets the real one
+    # from the admin page and it is stored in `platform_settings`; this value
+    # applies until they do, and is what the code falls back to if that table is
+    # unreadable. Nothing enforces the floor from here directly — every check
+    # goes through `min_order_value()` in app/models/settings.py.
     MIN_ORDER_VALUE = float(os.environ.get('MIN_ORDER_VALUE', 300))
 
     # Push notifications — optional, like email. Without a credential the app
@@ -160,6 +166,29 @@ class Config:
     # repository. Falls back to GOOGLE_APPLICATION_CREDENTIALS / the metadata
     # server when unset, which is what a Cloud Run deployment already has.
     FIREBASE_CREDENTIALS = os.environ.get('FIREBASE_CREDENTIALS')
+
+    # ── Farmer & stock report, published to Google Drive ──────────────────────
+    #
+    # The id of the Drive folder the every-2-days report is written into. It is
+    # the long string in the folder's URL:
+    #
+    #   https://drive.google.com/drive/folders/1AbC...XyZ
+    #                                          ^^^^^^^^^^
+    #
+    # That folder must be shared with the service account's email as an Editor.
+    # A service account has no Drive anyone can browse, so without a shared
+    # parent the upload succeeds into storage with no UI — the file exists and
+    # nobody can find it.
+    #
+    # Unset means the publish job is off, not broken: it logs why and returns
+    # cleanly rather than failing the whole cron run.
+    DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID')
+
+    # Reuses the Firebase key by default — same Google project, and one
+    # credential to rotate rather than two. Point this elsewhere only if you
+    # want the report uploaded by a different identity.
+    DRIVE_CREDENTIALS = (os.environ.get('DRIVE_CREDENTIALS')
+                         or os.environ.get('FIREBASE_CREDENTIALS'))
 
     # Admin seed
     ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL')

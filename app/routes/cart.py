@@ -5,20 +5,26 @@ A cart holds products from any number of farms, but an order cannot: a
 and paid for on its own. So checkout **fans out** — one order per line — and the
 customer sees one confirmation covering all of them.
 
-The ₹300 minimum is checked against the cart total, not per order. That is a
-deliberate choice with a known cost: a ₹300 cart split across three farms can
-send one of them out for ₹40, and under cash on delivery that trip costs more
-than the order. Watch for it; if it bites, the rule to change is
-`MIN_ORDER_VALUE` applied per farmer in `checkout` rather than once on the total.
+The order minimum is checked against the cart total, not per order. That is a
+deliberate choice with a known cost: a cart that just clears the floor split
+across three farms can send one of them out for ₹40, and under cash on delivery
+that trip costs more than the order. Watch for it; if it bites, the rule to
+change is `min_order_value()` applied per farmer in `checkout` rather than once
+on the total.
+
+The figure itself is set by an admin and lives in `platform_settings` — see
+`app/models/settings.py`. Both checks below read it live rather than caching it,
+so raising the floor takes effect on the next request instead of the next
+deploy.
 """
 
 import logging
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
 
 from ..extensions import db
-from ..models import CartItem, Product
+from ..models import CartItem, Product, min_order_value
 from ..services.request_service import create_purchase_request
 from ..utils.locking import lock_row
 
@@ -36,7 +42,7 @@ def _summary(customer_id):
     """The cart, its total, and how far it is from being orderable."""
     items = _items(customer_id)
     subtotal = round(sum(i.line_total for i in items), 2)
-    minimum = float(current_app.config.get('MIN_ORDER_VALUE', 300))
+    minimum = min_order_value()
     blocked = [i for i in items if i.problem()]
 
     return {
@@ -180,7 +186,10 @@ def checkout():
                                      'Please update your cart and try again.'}), 409
 
     subtotal = round(sum(i.line_total for i in items), 2)
-    minimum = float(current_app.config.get('MIN_ORDER_VALUE', 300))
+    # Read again here rather than trusting what the cart screen was told. An
+    # admin can raise the floor while a cart is open, and this is the check that
+    # decides — the same reason every product is re-validated a few lines up.
+    minimum = min_order_value()
     if subtotal < minimum:
         return jsonify({
             'error': f'The minimum order is ₹{minimum:.0f}. '

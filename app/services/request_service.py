@@ -68,8 +68,13 @@ def create_purchase_request(customer_id: int, data: dict):
     # floor to the whole basket. Enforcing it per line as well would make a
     # valid ₹400 cart of two ₹200 items impossible to check out.
     if not data.get('skip_minimum'):
-        from flask import current_app
-        minimum = float(current_app.config.get('MIN_ORDER_VALUE', 300))
+        # `min_order_value()` rather than the config directly: the figure is
+        # admin-editable now and lives in platform_settings, with the configured
+        # value as its fallback. Imported here to match how `current_app` was
+        # imported here before — this module is loaded during app setup and a
+        # top-level model import would be circular.
+        from ..models import min_order_value
+        minimum = min_order_value()
         if total < minimum:
             raise ValueError(
                 f'The minimum order is ₹{minimum:.0f}. This one comes to '

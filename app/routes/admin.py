@@ -1,10 +1,11 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, make_response, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from ..utils.decorators import admin_required
 from ..utils.helpers import paginate_response, log_audit
 from ..models import (User, Role, FarmerProfile, Product, PurchaseRequest, Review, Report,
                        FeaturedFarmer, FeaturedProduct, HomepageSection, Announcement, Category,
-                       FamilyPackOrder, FamilyPackSubscription)
+                       FamilyPackOrder, FamilyPackSubscription, PlatformSettings)
+from ..models.settings import MIN_ORDER_FLOOR, MIN_ORDER_CEILING
 
 from ..extensions import db
 from datetime import datetime
@@ -862,3 +863,170 @@ def list_coupon_redemptions():
     page, per_page = clamp_page(request.args.get('page'), request.args.get('per_page'), max_per_page=100)
     items, total = coupon_service.redemptions(page=page, per_page=per_page)
     return jsonify(paginate_response([r.to_dict() for r in items], total, page, per_page)), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PLATFORM SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@admin_bp.route('/settings', methods=['GET'])
+@jwt_required()
+@admin_required
+def get_settings():
+    """The figures an admin can change without a deploy."""
+    return jsonify(PlatformSettings.get().to_dict()), 200
+
+
+@admin_bp.route('/settings', methods=['PATCH'])
+@jwt_required()
+@admin_required
+def update_settings():
+    """Change the order minimum.
+
+    Only the keys actually present in the body are touched, so a client that
+    knows about one setting cannot blank the ones it has not heard of yet.
+
+    Sending `null` is not the same as omitting the key: `null` means "go back to
+    the configured default", which is the only way to undo a customisation. That
+    is why the presence check below is `in data` rather than a truthiness test —
+    `if data.get('min_order_value')` would treat both null *and* a deliberate
+    change to a falsy number as "not supplied".
+    """
+    admin_id = _get_admin_id()
+    data = request.get_json(silent=True) or {}
+    settings = PlatformSettings.get()
+    before = settings.to_dict()
+
+    if 'min_order_value' in data:
+        raw = data['min_order_value']
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            settings.min_order_value = None
+        else:
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return jsonify({'error': 'Enter the minimum order as a number'}), 400
+            if value != value or value in (float('inf'), float('-inf')):
+                return jsonify({'error': 'Enter the minimum order as a number'}), 400
+            if not (MIN_ORDER_FLOOR <= value <= MIN_ORDER_CEILING):
+                # Bounded rather than free. ₹0 turns the floor off without
+                # saying so, and 30000 for 300 closes the shop — both are one
+                # keystroke away and neither announces itself.
+                return jsonify({
+                    'error': f'The minimum order must be between '
+                             f'₹{MIN_ORDER_FLOOR:.0f} and ₹{MIN_ORDER_CEILING:.0f}'
+                }), 400
+            settings.min_order_value = round(value, 2)
+
+    settings.updated_by = admin_id
+    settings.updated_at = datetime.utcnow()
+
+    after = settings.to_dict()
+    # Worth an audit row: this figure decides whether every customer on the
+    # platform can check out, and "who changed it and when" is the first
+    # question when orders suddenly stop.
+    log_audit(admin_id, 'update_platform_settings', 'platform_settings', 1,
+              old_data=before, new_data=after)
+    db.session.commit()
+
+    return jsonify(after), 200
+
+
+@admin_bp.route('/reports/<slug>.xlsx', methods=['GET'])
+@jwt_required()
+@admin_required
+def export_report(slug):
+    """A report as a spreadsheet, downloaded now.
+
+    Byte-for-byte the file the scheduled job publishes to Drive — same rows,
+    same builder — so nobody has to work out whether the download and the
+    scheduled copy differ. The only difference is who asked: this is a
+    signed-in admin, that is the cron token.
+
+    `.xlsx` in the path rather than a query parameter because browsers and
+    proxies key their download behaviour off the extension, and a URL ending
+    `/reports/basket-orders` that returns a spreadsheet gets saved as a file
+    with no suffix surprisingly often.
+    """
+    from ..services import report_service
+    from ..services.report_workbook import build_bytes, download_filename
+
+    try:
+        module = report_service.get(slug)
+    except report_service.UnknownReport:
+        return jsonify({'error': f'Unknown report {slug!r}',
+                        'available': sorted(report_service.available())}), 404
+
+    payload = report_service.payload(module)
+    response = make_response(build_bytes(payload))
+    response.headers['Content-Type'] = (
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response.headers['Content-Disposition'] = (
+        f'attachment; filename="{download_filename(payload)}"')
+    # Stock and delivery dates move; a cached copy of this is worse than a slow
+    # one.
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@admin_bp.route('/reports/publish', methods=['POST'])
+@jwt_required()
+@admin_required
+def publish_all_reports():
+    """Rebuild all three reports and push them to Drive, now.
+
+    The same job the cron runs — `report_service.publish` is the one code path,
+    so the button and the schedule cannot produce different files. This exists
+    because the schedule is every two days and sometimes you want the numbers
+    in Drive before then: a farmer has just restocked, a basket was cancelled,
+    and the copy in the folder is a day and a half old.
+
+    Distinct from the download buttons beside it. That gets a file onto *your*
+    device; this updates the copy everyone else is looking at.
+
+    **200 even when one of the three fails**, with the outcome of each in the
+    body — the same convention as `/api/cron/run`, and for a better reason than
+    consistency. A 500 makes the client's error path run instead of its success
+    path, so an admin who published three reports and had one fail would be
+    told only that something broke, and never that the other two are now
+    current. The request succeeded; some of the work did not, and the body says
+    which.
+
+    A report that was `skipped` because Drive is not configured is reported as
+    skipped, not as an error — showing a red banner for a setup step nobody has
+    done yet tells the admin something is broken when nothing is.
+    """
+    from ..services import report_service
+
+    outcome = report_service.publish_all()
+    published = [r for r in outcome['results'] if r.get('published')]
+
+    log_audit(_get_admin_id(), 'publish_reports', 'report', None,
+              new_data={'published': [r['report'] for r in published],
+                        'ok': outcome['ok']})
+    db.session.commit()
+
+    return jsonify(outcome), 200
+
+
+@admin_bp.route('/reports/<slug>/publish', methods=['POST'])
+@jwt_required()
+@admin_required
+def publish_one_report(slug):
+    """Rebuild one report and push it to Drive, now."""
+    from ..services import report_service
+
+    try:
+        result = report_service.publish(slug)
+    except report_service.UnknownReport:
+        return jsonify({'error': f'Unknown report {slug!r}',
+                        'available': sorted(report_service.available())}), 404
+    except Exception:
+        current_app.logger.exception('%s failed to publish', slug)
+        return jsonify({'error': 'Could not publish — see the server log'}), 500
+
+    log_audit(_get_admin_id(), 'publish_report', 'report', None,
+              new_data={'report': slug, 'published': bool(result.get('published'))})
+    db.session.commit()
+
+    return jsonify(result), 200

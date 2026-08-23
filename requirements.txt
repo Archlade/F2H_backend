@@ -22,5 +22,12 @@ python-slugify==8.0.4
 # the app is closed.
 firebase-admin==7.5.0
 
-# Online payments. Optional at runtime — the app boots and every other feature
-# works without it — but required to take money.
+# (The online-payments entry that stood here went with the move to cash on
+# delivery. Kept as a note so nobody re-adds a gateway thinking it was dropped
+# by accident.)
+
+# Publishing the every-2-days farmer/stock report to Google Drive.
+# Only imported by app/services/drive_upload.py, and only when the job runs —
+# the app boots fine without these, it just logs that Drive is unconfigured.
+google-api-python-client==2.149.0
+google-auth==2.35.0
