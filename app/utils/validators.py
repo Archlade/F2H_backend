@@ -47,15 +47,18 @@ def normalise_phone(phone):
 def phone_problem(phone):
     """Return a human-readable problem with the phone number, or None.
 
-    Ten digits, starting 6–9 — the format every Indian mobile has. This used to
-    accept any 7-to-15 digit run on the reasoning that a farmer with an unusual
-    number still has to be reachable. In practice the loose rule let typos
-    through, and under cash on delivery an unreachable number is a driver
-    standing outside a building with produce and no way to be let in.
+    Ten digits. That is the whole rule.
 
-    Landlines are not accepted, deliberately: this number is used to reach
-    somebody *during* a delivery, and a landline is the one phone they will not
-    be near.
+    Punctuation, spaces, a `+91` country code and a leading `0` are all stripped
+    before counting, so `9876543210`, `+91 98765 43210` and `098765 43210` are
+    one number and all three pass — a form that refuses two of the three is a
+    form people retype in irritation.
+
+    What is deliberately *not* checked is the first digit. Requiring 6–9 meant
+    requiring an Indian mobile, which refused landlines and anyone signing up
+    from outside India. The length check catches what it was really there for —
+    a typo or a half-typed number — without deciding what kind of phone somebody
+    is allowed to own.
     """
     if not (phone or '').strip():
         return 'Phone number is required'
@@ -64,11 +67,7 @@ def phone_problem(phone):
     if not digits:
         return 'Phone number is required'
     if len(digits) != 10:
-        return 'Enter a 10-digit mobile number'
-    if digits[0] not in '6789':
-        # India's mobile series. A number starting 0–5 is a landline, a short
-        # code, or a digit dropped from the front.
-        return 'An Indian mobile number starts with 6, 7, 8 or 9'
+        return 'Enter a 10-digit phone number'
     return None
 
 

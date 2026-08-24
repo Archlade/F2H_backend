@@ -144,7 +144,8 @@ def register():
     # Stored as the bare ten digits, whatever the person typed. '+91 98765
     # 43210' and '9876543210' are one number, and keeping them as written means
     # the same contact looks like two — and a `tel:` link built from one of them
-    # may not dial.
+    # may not dial. Safe to normalise unconditionally: `phone_problem` above has
+    # already established there are exactly ten digits here.
     data['phone'] = normalise_phone(data.get('phone'))
 
     role = data.get('role', 'customer')

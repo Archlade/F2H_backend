@@ -932,6 +932,35 @@ def update_settings():
     return jsonify(after), 200
 
 
+@admin_bp.route('/reports/<slug>/data', methods=['GET'])
+@jwt_required()
+@admin_required
+def report_data(slug):
+    """A report as JSON, for rendering in the admin panel.
+
+    The same structure the spreadsheet is built from — rows, column order and
+    labels, summary figures — so the table on screen and the file in Drive
+    cannot show different things. The client does not decide which columns
+    exist or what they are called; the report module does, and both surfaces
+    read that.
+
+    `/data` on the end rather than a bare `/reports/<slug>`, because
+    `/admin/reports` already belongs to content moderation: a bare slug route
+    would sit alongside `<int:report_id>` and make `/admin/reports/5` ambiguous
+    between "moderation report 5" and "a report named 5". The suffix keeps the
+    two namespaces from ever having to be told apart.
+    """
+    from ..services import report_service
+
+    try:
+        module = report_service.get(slug)
+    except report_service.UnknownReport:
+        return jsonify({'error': f'Unknown report {slug!r}',
+                        'available': sorted(report_service.available())}), 404
+
+    return jsonify(report_service.payload(module)), 200
+
+
 @admin_bp.route('/reports/<slug>.xlsx', methods=['GET'])
 @jwt_required()
 @admin_required
