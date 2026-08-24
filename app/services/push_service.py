@@ -24,6 +24,7 @@ forever.
 
 import logging
 import os
+import threading
 
 from flask import current_app, has_app_context
 
@@ -221,7 +222,29 @@ def _send(user_id, title, body, data):
         return 0
 
     tokens = [row.token for row in rows]
-    message = messaging.MulticastMessage(
+
+    try:
+        response = messaging.send_each_for_multicast(
+            _build_message(tokens, title, body, data, user_id),
+            app=_firebase_app(),
+        )
+    except Exception:
+        logger.exception('FCM rejected the whole batch for user %s', user_id)
+        return 0
+
+    _prune(rows, response)
+    return response.success_count
+
+
+def _build_message(tokens, title, body, data, user_id):
+    """The one place a push is assembled.
+
+    Extracted so the self-test in [diagnose] sends a byte-identical message to
+    the real thing. A test that builds its own payload can pass while every
+    genuine notification is dropped — the channel id below is exactly the sort
+    of field that would differ — which makes the test worse than none at all.
+    """
+    return messaging.MulticastMessage(
         tokens=tokens,
         notification=messaging.Notification(title=title, body=body or None),
         # Every value has to be a string: FCM's data payload is string-to-string
@@ -249,14 +272,146 @@ def _send(user_id, title, body, data):
         ),
     )
 
-    try:
-        response = messaging.send_each_for_multicast(message, app=_firebase_app())
-    except Exception:
-        logger.exception('FCM rejected the whole batch for user %s', user_id)
-        return 0
 
+def background_tasks_run(timeout=4.0):
+    """Whether `socketio.start_background_task` actually executes anything.
+
+    This is the blind spot in every other check on this page. `dispatch_to_user`
+    hands the real send to a background greenlet and returns; nothing waits on
+    it and nothing reports if it never runs. So the credential can be valid, the
+    tokens current, and FCM perfectly reachable, while not one notification is
+    ever sent — and every diagnostic short of this one says the system is
+    healthy.
+
+    It happens when the process serving the app is not the one
+    `SOCKETIO_ASYNC_MODE` names. `async_mode` defaults to ``eventlet``, and
+    ``eventlet.monkey_patch()`` is called in `run.py` — so ``python run.py``
+    is fine. Serve the same app through a gunicorn sync worker, or any entry
+    point that skips that patch, and `start_background_task` spawns a greenlet
+    onto a hub that never gets control. It waits there forever. No exception,
+    no log line, nothing in the shade of anybody's phone.
+
+    Tests the mechanism rather than a push: spawn a task whose whole job is to
+    set a flag, and see whether the flag gets set. Under a correctly patched
+    eventlet this returns in microseconds because `Event.wait` yields to the
+    hub. Under a broken one it blocks the caller for `timeout` and returns
+    False, which is the answer worth waiting for.
+    """
+    done = threading.Event()
+    try:
+        socketio.start_background_task(done.set)
+    except Exception:
+        logger.exception('start_background_task raised outright')
+        return False
+    return done.wait(timeout)
+
+
+def diagnose(user_id):
+    """Send a real push to `user_id`'s own devices and report what happened.
+
+    Push has four ways to fail and they all look the same from a phone that
+    stays quiet: no credential on the server, no registered device, a token FCM
+    has retired, or a delivery that left the server and was dropped further
+    down. The notification row is written in every one of those cases, so the
+    in-app list fills up normally and the only symptom is silence.
+
+    This walks the chain in order and stops at the first broken link, so the
+    answer is one specific sentence rather than four things to go and check:
+
+      ``server``      — no usable service-account credential. Nothing is ever
+                        sent to anyone; ``push_problem`` says which part.
+      ``no_devices``  — the server is fine and this account has never
+                        registered a phone. The app does that at sign-in, so
+                        this usually means signing in again on the handset.
+      ``rejected``    — FCM refused the whole batch, credential and all.
+      ``all_failed``  — every token was rejected individually. ``failures``
+                        carries FCM's reason per device.
+      ``sent``        — FCM accepted it. If the phone still shows nothing the
+                        remaining causes are on the device: notifications
+                        turned off for F2H in Android settings, battery
+                        optimisation, or a Do Not Disturb mode.
+
+    Runs synchronously, unlike [dispatch_to_user] — the caller is a person
+    waiting for an answer, not a customer waiting for a checkout to finish.
+
+    Never returns the tokens themselves. They are not quite secrets, but anyone
+    holding one can push to that handset, and an admin screen is no place to
+    put them.
+    """
+    problem = push_config_problem()
+
+    rows = (DeviceToken.query
+            .filter_by(user_id=user_id)
+            .order_by(DeviceToken.last_seen_at.desc())
+            .limit(500)
+            .all())
+
+    result = {
+        'push_problem': problem,
+        'devices': [row.to_dict() for row in rows],
+        'device_count': len(rows),
+        'attempted': 0,
+        'delivered': 0,
+        'failures': [],
+        # Reported alongside the verdict rather than folded into it, because
+        # the two fail independently: FCM can be perfectly healthy while no
+        # real notification is ever dispatched, and vice versa. A verdict of
+        # `sent` with this False is the one combination that looks like success
+        # and is not.
+        'background_ok': background_tasks_run(),
+        'async_mode': getattr(socketio, 'async_mode', None),
+    }
+
+    if problem is not None:
+        result['verdict'] = 'server'
+        return result
+
+    if not rows:
+        result['verdict'] = 'no_devices'
+        return result
+
+    tokens = [row.token for row in rows]
+
+    try:
+        response = messaging.send_each_for_multicast(
+            _build_message(
+                tokens,
+                'F2H test notification',
+                'Push is working — this was sent from the admin settings screen.',
+                {'type': 'push_test'},
+                user_id,
+            ),
+            app=_firebase_app(),
+        )
+    except Exception as error:
+        logger.exception('Push self-test failed outright for user %s', user_id)
+        result['verdict'] = 'rejected'
+        result['push_problem'] = f'FCM rejected the request: {error}'
+        return result
+
+    result['attempted'] = len(tokens)
+    result['delivered'] = response.success_count
+    result['failures'] = [
+        {
+            'platform': row.platform,
+            'last_seen_at': row.last_seen_at.isoformat() if row.last_seen_at else None,
+            'error': type(item.exception).__name__ if item.exception else 'unknown',
+            'detail': str(item.exception) if item.exception else None,
+            # Named so the screen can say "this phone reinstalled the app" —
+            # which is normal and self-healing — rather than reporting it as a
+            # fault. The row is deleted just below.
+            'dead': _is_dead_token(item.exception),
+        }
+        for row, item in zip(rows, response.responses)
+        if not item.success
+    ]
+
+    # Same pruning the real send does, so a self-test also cleans up after an
+    # uninstall rather than reporting the same dead token every time.
     _prune(rows, response)
-    return response.success_count
+
+    result['verdict'] = 'sent' if response.success_count else 'all_failed'
+    return result
 
 
 def _unread_count(user_id):

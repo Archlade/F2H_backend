@@ -1059,3 +1059,37 @@ def publish_one_report(slug):
     db.session.commit()
 
     return jsonify(result), 200
+
+
+# ── Push diagnostics ───────────────────────────────────────────────────────────
+@admin_bp.route('/push/self-test', methods=['POST'])
+@jwt_required()
+@admin_required
+def push_self_test():
+    """Send a test notification to the calling admin's own devices.
+
+    "I am not getting notifications" has four unrelated causes that produce
+    identical symptoms — see `push_service.diagnose`. This sends a real push
+    down the real code path and reports which link is broken.
+
+    Only ever to the caller's own registered devices. Aiming a test at another
+    account would make this a way for an admin to make an arbitrary user's
+    phone buzz, which is not a diagnostic.
+
+    **200 even when the send fails.** The failure is the answer here; routing it
+    through the client's error path would replace a specific reason with a
+    generic "request failed" and lose the whole point.
+    """
+    from ..services.push_service import diagnose
+
+    try:
+        return jsonify(diagnose(_get_admin_id())), 200
+    except Exception:
+        current_app.logger.exception('Push self-test raised')
+        return jsonify({
+            'verdict': 'error',
+            'push_problem': 'The self-test itself failed — see the server log',
+            'devices': [], 'device_count': 0,
+            'attempted': 0, 'delivered': 0, 'failures': [],
+            'background_ok': None, 'async_mode': None,
+        }), 200
