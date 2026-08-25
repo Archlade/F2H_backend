@@ -931,11 +931,13 @@ def update_settings():
             if value != value or value in (float('inf'), float('-inf')):
                 return jsonify({'error': 'Enter the delivery charge as a number'}), 400
             if not (DELIVERY_CHARGE_FLOOR <= value <= DELIVERY_CHARGE_CEILING):
-                # 0 is allowed here, unlike the order minimum — it is how the
-                # charge is switched off, and that is a real thing to want.
+                # Sending null — not 0 — is what switches the charge off. The
+                # branch above handles that and never reaches here, so the
+                # message can talk about the range without qualifying itself.
                 return jsonify({
                     'error': f'The delivery charge must be between '
-                             f'₹{DELIVERY_CHARGE_FLOOR:.0f} and ₹{DELIVERY_CHARGE_CEILING:.0f}'
+                             f'₹{DELIVERY_CHARGE_FLOOR:.0f} and ₹{DELIVERY_CHARGE_CEILING:.0f}, '
+                             f'or cleared to charge nothing'
                 }), 400
             settings.delivery_charge = round(value, 2)
 

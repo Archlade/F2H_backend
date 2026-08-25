@@ -129,9 +129,17 @@ def delivery_charge():
 MIN_ORDER_FLOOR = 1.0
 MIN_ORDER_CEILING = 10000.0
 
-# Delivery starts at 0 because 0 is meaningful here — it is how you switch the
-# charge off, and unlike the order minimum that is a state worth supporting. The
-# ceiling is well under the order minimum on purpose: a delivery fee larger than
-# the smallest order you accept is a typo, not a pricing decision.
-DELIVERY_CHARGE_FLOOR = 0.0
+# A delivery costs a van, a driver and a round trip, so anything under this is a
+# fee that does not cover the thing it is charging for.
+#
+# **Switching the charge off is done by clearing the field, not by typing 0.**
+# 0 used to be the floor for exactly that purpose; with the floor at 50 it is no
+# longer a value an admin can save. Clearing sets the column to NULL, which
+# means "not configured" and falls back to `DELIVERY_CHARGE` — 0 — so nothing is
+# charged. Both routes still exist; only the gesture changed, and every helper
+# string in the two admin screens says so.
+#
+# The ceiling is well under the order minimum on purpose: a delivery fee larger
+# than the smallest order you accept is a typo, not a pricing decision.
+DELIVERY_CHARGE_FLOOR = 50.0
 DELIVERY_CHARGE_CEILING = 500.0
