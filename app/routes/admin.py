@@ -697,6 +697,10 @@ def list_all_orders():
             'farmer': _contact(r.farmer),
             'delivery': _place(r.delivery_address),
             'farmer_payment': farmer_pay.get(('request', r.id)),
+            # Who is carrying it. Present on both order shapes so the assign
+            # control does not have to know which table a row came from.
+            'assigned_delivery_id': r.assigned_delivery_id,
+            'courier_name': r.courier.full_name if r.courier else None,
         })
 
     for o in pack_orders:
@@ -715,6 +719,8 @@ def list_all_orders():
             'farmer': _contact(o.farmer),
             'delivery': _place(o.delivery_address),
             'farmer_payment': farmer_pay.get(('pack-order', o.id)),
+            'assigned_delivery_id': o.assigned_delivery_id,
+            'courier_name': o.courier.full_name if o.courier else None,
         })
 
     # Sorted on the ISO string, which orders correctly because the format is
@@ -1082,6 +1088,263 @@ def publish_one_report(slug):
     db.session.commit()
 
     return jsonify(result), 200
+
+
+# ── Delivery partners ──────────────────────────────────────────────────────────
+@admin_bp.route('/delivery-partners', methods=['GET'])
+@jwt_required()
+@admin_required
+def list_delivery_partners():
+    """Every delivery account, for the assign dropdown and the manage screen."""
+    rows = (User.query.join(Role, User.role_id == Role.id)
+            .filter(Role.name == 'delivery', User.deleted_at.is_(None))
+            .order_by(User.first_name).all())
+
+    return jsonify([{
+        'id': u.id,
+        'full_name': u.full_name,
+        'email': u.email,
+        'phone': u.phone,
+        'is_active': u.is_active,
+        # What each is currently carrying, so an admin assigning work can see
+        # who is already loaded rather than guessing.
+        'active_orders': (
+            PurchaseRequest.query.filter(
+                PurchaseRequest.assigned_delivery_id == u.id,
+                PurchaseRequest.status.notin_(['completed', 'cancelled', 'rejected']),
+            ).count()
+            + FamilyPackOrder.query.filter(
+                FamilyPackOrder.assigned_delivery_id == u.id,
+                FamilyPackOrder.status.notin_(['completed', 'cancelled', 'rejected']),
+            ).count()
+        ),
+    } for u in rows]), 200
+
+
+@admin_bp.route('/delivery-partners', methods=['POST'])
+@jwt_required()
+@admin_required
+def create_delivery_partner():
+    """Create a delivery account.
+
+    There is no self-registration for this role, deliberately: a delivery
+    account can read customers' addresses and phone numbers and can record that
+    a farmer has been handed cash. Those are not powers to hand out on a signup
+    form — somebody has to decide, in person, that this individual does the job.
+
+    The password is set here and given to them. No email is sent because the
+    mail service is not configured, and a "check your inbox" that never arrives
+    would be worse than telling the admin to pass it on themselves.
+    """
+    data = request.get_json(silent=True) or {}
+
+    required = ('email', 'password', 'first_name', 'last_name')
+    missing = [f for f in required if not (data.get(f) or '').strip()]
+    if missing:
+        return jsonify({'error': f'{", ".join(missing)} required'}), 400
+
+    from ..utils.validators import phone_problem
+    problem = phone_problem(data.get('phone'))
+    if problem:
+        # A phone number is required here where it is optional elsewhere: this
+        # is the person a customer rings when nobody answers the door, and an
+        # admin rings when a round goes quiet.
+        return jsonify({'error': problem}), 400
+
+    if len((data.get('password') or '')) < 8:
+        return jsonify({'error': 'Password must be at least 8 characters'}), 400
+
+    from ..services.auth_service import register_user
+    try:
+        user = register_user(data, role_name='delivery')
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    log_audit(_get_admin_id(), 'create_delivery_partner', 'user', user.id,
+              new_data={'email': user.email, 'full_name': user.full_name})
+    db.session.commit()
+
+    return jsonify({'id': user.id, 'full_name': user.full_name,
+                    'email': user.email, 'phone': user.phone,
+                    'is_active': user.is_active, 'active_orders': 0}), 201
+
+
+@admin_bp.route('/orders/<string:kind>/<int:order_id>/assign', methods=['PATCH'])
+@jwt_required()
+@admin_required
+def assign_delivery(kind, order_id):
+    """Hand an order to a delivery account, or take it back.
+
+    `kind` names which table the order is in, because the two order types live
+    in different ones and the admin screen lists them together.
+
+    Both spellings of the basket are accepted. `/admin/orders` labels those rows
+    `pack-order` and the rest of this file calls them baskets, so a caller
+    passing back the `order_type` it was given would otherwise 400 on every
+    basket — which is exactly what the first version of the screen did.
+    Accepting both is cheaper than renaming a field other clients already read.
+
+    A null `delivery_id` unassigns, which is how an order moves between drivers
+    or returns to the pool. Not a delete — the order is untouched, only who is
+    carrying it changes.
+    """
+    data = request.get_json(silent=True) or {}
+    model = {
+        'request': PurchaseRequest,
+        'basket': FamilyPackOrder,
+        'pack-order': FamilyPackOrder,
+    }.get(kind)
+    if model is None:
+        return jsonify({'error': "kind must be 'request' or 'pack-order'"}), 400
+
+    order = model.query.get_or_404(order_id)
+    raw = data.get('delivery_id')
+
+    if raw is None:
+        order.assigned_delivery_id = None
+        assignee = None
+    else:
+        assignee = (User.query.join(Role, User.role_id == Role.id)
+                    .filter(User.id == raw, Role.name == 'delivery',
+                            User.deleted_at.is_(None))
+                    .first())
+        # Checked rather than assumed: without this an admin could assign an
+        # order to any user id at all, and `party_for` would then hand that
+        # account delivery powers over it.
+        if assignee is None:
+            return jsonify({'error': 'That is not a delivery account'}), 400
+        if not assignee.is_active:
+            return jsonify({'error': 'That delivery account is deactivated'}), 400
+        order.assigned_delivery_id = assignee.id
+
+    log_audit(_get_admin_id(), 'assign_delivery', kind, order_id,
+              new_data={'delivery_id': order.assigned_delivery_id})
+    db.session.commit()
+
+    return jsonify({'id': order.id, 'kind': kind,
+                    'assigned_delivery_id': order.assigned_delivery_id,
+                    'courier': ({'id': assignee.id, 'full_name': assignee.full_name,
+                                 'phone': assignee.phone} if assignee else None)}), 200
+
+
+@admin_bp.route('/delivery-cash', methods=['GET'])
+@jwt_required()
+@admin_required
+def delivery_cash():
+    """Per delivery partner: collected, handed over, and still in their pocket.
+
+    **Collected is derived, not stored.** It is the sum of `total_price` over
+    that account's completed orders — already recorded, once, on each order. A
+    second running total kept in its own column would be a second thing to keep
+    in step, and the first time the two disagreed nobody could say which was
+    right. Only the handovers are written down, because nothing else in the
+    system knows that cash moved from a pocket to a desk.
+
+    So `outstanding` is a subtraction of one derived figure and one stored one,
+    and cannot drift.
+
+    Completed orders only. Cash is collected at the door, so an order still out
+    for delivery is money nobody is holding yet.
+    """
+    from ..models import DeliveryRemittance
+
+    partners = (User.query.join(Role, User.role_id == Role.id)
+                .filter(Role.name == 'delivery', User.deleted_at.is_(None))
+                .order_by(User.first_name).all())
+
+    rows = []
+    for u in partners:
+        requests_total = db.session.query(
+            func.coalesce(func.sum(PurchaseRequest.total_price), 0)
+        ).filter(PurchaseRequest.assigned_delivery_id == u.id,
+                 PurchaseRequest.status == 'completed').scalar() or 0
+
+        baskets_total = db.session.query(
+            func.coalesce(func.sum(FamilyPackOrder.total_price), 0)
+        ).filter(FamilyPackOrder.assigned_delivery_id == u.id,
+                 FamilyPackOrder.status == 'completed').scalar() or 0
+
+        handed = db.session.query(
+            func.coalesce(func.sum(DeliveryRemittance.amount), 0)
+        ).filter(DeliveryRemittance.delivery_id == u.id).scalar() or 0
+
+        collected = float(requests_total) + float(baskets_total)
+        rows.append({
+            'delivery_id': u.id,
+            'full_name': u.full_name,
+            'phone': u.phone,
+            'is_active': u.is_active,
+            'collected': round(collected, 2),
+            'handed_over': round(float(handed), 2),
+            'outstanding': round(collected - float(handed), 2),
+        })
+
+    return jsonify({
+        'partners': rows,
+        'totals': {
+            'collected': round(sum(r['collected'] for r in rows), 2),
+            'handed_over': round(sum(r['handed_over'] for r in rows), 2),
+            'outstanding': round(sum(r['outstanding'] for r in rows), 2),
+        },
+    }), 200
+
+
+@admin_bp.route('/delivery-cash/<int:delivery_id>/remittances', methods=['GET'])
+@jwt_required()
+@admin_required
+def list_remittances(delivery_id):
+    """Every handover recorded for one partner, newest first."""
+    from ..models import DeliveryRemittance
+    rows = (DeliveryRemittance.query
+            .filter_by(delivery_id=delivery_id)
+            .order_by(DeliveryRemittance.created_at.desc())
+            .limit(200).all())
+    return jsonify([r.to_dict() for r in rows]), 200
+
+
+@admin_bp.route('/delivery-cash/<int:delivery_id>/remittances', methods=['POST'])
+@jwt_required()
+@admin_required
+def record_remittance(delivery_id):
+    """Record cash received from a delivery partner.
+
+    Rows are never edited or deleted. A handover entered wrongly is corrected by
+    recording a negative one, so the trail shows the mistake *and* the
+    correction rather than quietly becoming a different history — which is why
+    a negative amount is accepted here rather than rejected as nonsense.
+
+    Zero is refused, because it is never a real handover and is almost always a
+    half-finished form.
+    """
+    from ..models import DeliveryRemittance
+
+    data = request.get_json(silent=True) or {}
+    partner = (User.query.join(Role, User.role_id == Role.id)
+               .filter(User.id == delivery_id, Role.name == 'delivery').first())
+    if partner is None:
+        return jsonify({'error': 'That is not a delivery account'}), 404
+
+    try:
+        amount = round(float(data.get('amount')), 2)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Enter the amount as a number'}), 400
+    if amount != amount or amount in (float('inf'), float('-inf')) or amount == 0:
+        return jsonify({'error': 'Enter an amount other than zero'}), 400
+
+    row = DeliveryRemittance(
+        delivery_id=delivery_id,
+        amount=amount,
+        received_by=_get_admin_id(),
+        note=(data.get('note') or '').strip()[:255] or None,
+    )
+    db.session.add(row)
+    db.session.flush()
+
+    log_audit(_get_admin_id(), 'record_remittance', 'delivery_remittance', row.id,
+              new_data={'delivery_id': delivery_id, 'amount': amount})
+    db.session.commit()
+
+    return jsonify(row.to_dict()), 201
 
 
 # ── Push diagnostics ───────────────────────────────────────────────────────────

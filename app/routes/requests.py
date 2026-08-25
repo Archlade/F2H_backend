@@ -69,6 +69,31 @@ def list_requests():
         reqs, total = get_requests_for_farmer(user_id, status, page, per_page)
     elif role in ('customer', 'farmer'):
         reqs, total = get_requests_for_customer(user_id, status, page, per_page)
+    elif role == 'delivery':
+        # Only what this account was assigned, and only what is still in play.
+        #
+        # The filter is the authorisation — there is no separate check, in the
+        # same way `party_for` is the authorisation on a single order. An
+        # unassigned order and another driver's order are both simply absent.
+        #
+        # Completed and cancelled rows are dropped unless asked for by name. A
+        # delivery round is a list of things still to do, and every order the
+        # account has ever carried accumulating at the bottom of it makes the
+        # screen worse every week.
+        query = PurchaseRequest.query.filter(
+            PurchaseRequest.assigned_delivery_id == user_id)
+        if status:
+            query = query.filter(PurchaseRequest.status == status)
+        else:
+            query = query.filter(
+                PurchaseRequest.status.notin_(['completed', 'cancelled', 'rejected']))
+        total = query.count()
+        reqs = (query.order_by(PurchaseRequest.created_at.desc())
+                .offset((page - 1) * per_page).limit(per_page).all())
+        # `for_courier` rather than `to_dict` — adds the customer's phone, and
+        # the cash figure while a pickup is still owed.
+        return jsonify(paginate_response(
+            [r.for_courier() for r in reqs], total, page, per_page)), 200
     elif role == 'admin':
         query = PurchaseRequest.query
         if status:
@@ -93,8 +118,15 @@ def get_request(request_id):
     # placed this order is its buyer and must be able to open it. Checking
     # `farmer_id` alone used to 403 a farmer on their own purchases.
     from ..models.request import party_for
-    if party_for(req, user_id, role) is None:
+    party = party_for(req, user_id, role)
+    if party is None:
         return jsonify({'error': 'Forbidden'}), 403
+
+    # The courier gets the phone number and, while a pickup is still owed, the
+    # cash figure. Nobody else does, including an admin — they have their own
+    # screens for that and this keeps one payload from serving two audiences.
+    if party == 'delivery':
+        return jsonify(req.for_courier()), 200
 
     return jsonify(req.to_dict()), 200
 

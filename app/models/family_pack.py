@@ -110,6 +110,10 @@ class FamilyPackOrder(db.Model):
                 'out_for_delivery', 'completed', 'cancelled'),
         default='pending'
     )
+    # See the matching column on PurchaseRequest — it is what authorises a
+    # delivery account to touch this order at all.
+    assigned_delivery_id = db.Column(
+        db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), index=True)
     delivery_address_id = db.Column(db.Integer, db.ForeignKey('addresses.id', ondelete='SET NULL'))
     delivery_notes = db.Column(db.Text)
     customer_message = db.Column(db.Text)
@@ -140,6 +144,7 @@ class FamilyPackOrder(db.Model):
     subscription = db.relationship('FamilyPackSubscription', back_populates='deliveries')
     delivery_address = db.relationship('Address', foreign_keys=[delivery_address_id])
     canceller = db.relationship('User', foreign_keys=[cancelled_by])
+    courier = db.relationship('User', foreign_keys=[assigned_delivery_id])
     chat = db.relationship('Chat', foreign_keys='Chat.family_pack_order_id',
                            back_populates='family_pack_order', uselist=False)
     status_history = db.relationship('RequestStatusHistory',
@@ -212,6 +217,29 @@ class FamilyPackOrder(db.Model):
                 }
         if self.delivery_address:
             data['delivery_address'] = self.delivery_address.to_dict()
+        if self.courier:
+            data['courier'] = {'id': self.courier.id,
+                               'full_name': self.courier.full_name,
+                               'phone': self.courier.phone}
+        return data
+
+    def for_courier(self):
+        """This basket as the assigned delivery account should see it.
+
+        The twin of `PurchaseRequest.for_courier`; see that one for why the
+        farmer's payout never appears here. Kept as two methods rather than a
+        shared mixin because the two models have no common base and inventing
+        one for six lines would be the larger change — but they must stay in
+        step, and a difference between them is a delivery account seeing more
+        on one kind of order than the other.
+        """
+        data = self.to_dict()
+
+        if self.customer:
+            data.setdefault('customer', {})
+            data['customer']['phone'] = self.customer.phone
+
+        data['amount_to_collect'] = float(self.total_price or 0)
         return data
 
 

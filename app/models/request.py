@@ -19,6 +19,26 @@ PARTY_TRANSITIONS = {
     # happened. `out_for_delivery` follows pickup and is equally F2H's.
     'seller': {'accepted', 'rejected', 'chat_active', 'confirmed', 'preparing',
                'ready_for_pickup', 'completed', 'cancelled'},
+    # Two states, and neither of them is `picked_up`.
+    #
+    # A delivery account loads from the store room, carries the order
+    # (`out_for_delivery`) and takes the customer's cash (`completed`). That is
+    # the whole of the job.
+    #
+    # `picked_up` is deliberately not theirs even though it sounds like it is.
+    # It means F2H collecting produce *from the farm* and handing the farmer
+    # their cash — it happens before anything reaches the store room, and the
+    # person driving to a customer's door is never at that gate. Giving it to
+    # them would let a delivery account record a farmer as paid for a
+    # collection they had no part in, and would put a payout figure in front of
+    # somebody who has no reason to see one.
+    #
+    # **Cannot cancel.** A delivery account only ever touches an order the farm
+    # has already been paid for and the store room has already released. A
+    # cancellation there is not an order being called off, it is a write-off,
+    # and that should cost a phone call to an admin rather than one tap by
+    # whoever is standing at a door nobody answered.
+    'delivery': {'out_for_delivery', 'completed'},
     'admin': {'accepted', 'rejected', 'admin_review', 'chat_active', 'confirmed',
               'preparing', 'picked_up', 'ready_for_pickup', 'out_for_delivery',
               'completed', 'cancelled'},
@@ -28,6 +48,7 @@ PARTY_TRANSITIONS = {
 ROLE_TRANSITIONS = {
     'customer': PARTY_TRANSITIONS['buyer'],
     'farmer': PARTY_TRANSITIONS['seller'],
+    'delivery': PARTY_TRANSITIONS['delivery'],
     'admin': PARTY_TRANSITIONS['admin'],
 }
 
@@ -35,14 +56,22 @@ _ROLE_ALIASES = {'customer': 'buyer', 'farmer': 'seller'}
 
 
 def party_for(order, actor_id, actor_role):
-    """Which side of this order the actor is on: 'buyer', 'seller', 'admin' or None.
+    """Which side of this order the actor is on, or None.
+
+    'buyer', 'seller', 'delivery', 'admin' — or None for someone with no stake
+    in the order, which callers treat as "not authorised".
 
     An admin is an admin everywhere. Otherwise the answer comes from the row:
-    whoever placed it is the buyer and whoever is selling is the seller,
-    regardless of what kind of account either of them holds.
+    whoever placed it is the buyer, whoever is selling is the seller, and
+    whoever it was assigned to is the delivery party — regardless of what kind
+    of account any of them holds.
 
-    Returns None for someone with no stake in the order, which callers treat
-    as "not authorised".
+    **Delivery is decided by the assignment, not by the account role**, which is
+    the same rule the other two follow and matters for the same reason. A
+    `delivery` account with no assignment on this order is a stranger to it and
+    gets None, so holding the role grants nothing on its own; it has to have
+    been given the job. That is what keeps one delivery account out of another's
+    orders without a single explicit check in any route.
     """
     if actor_role == 'admin':
         return 'admin'
@@ -50,6 +79,11 @@ def party_for(order, actor_id, actor_role):
         return 'buyer'
     if getattr(order, 'farmer_id', None) == actor_id:
         return 'seller'
+    # Last, so that a delivery account which somehow also owns the order is
+    # treated as its buyer or seller first — the stronger claim wins.
+    if (actor_role == 'delivery'
+            and getattr(order, 'assigned_delivery_id', None) == actor_id):
+        return 'delivery'
     return None
 
 
@@ -160,6 +194,15 @@ class PurchaseRequest(db.Model):
                 'out_for_delivery', 'completed', 'cancelled'),
         default='pending'
     )
+    # Which delivery account is carrying this order, or NULL for unassigned.
+    #
+    # This is the whole of the delivery role's authorisation: `party_for` reads
+    # it, so an account that is not named here has no standing on the order and
+    # every read and write refuses. ON DELETE SET NULL rather than CASCADE —
+    # removing a delivery account must return their orders to the pool, not
+    # delete the orders.
+    assigned_delivery_id = db.Column(
+        db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), index=True)
     delivery_address_id = db.Column(db.Integer, db.ForeignKey('addresses.id', ondelete='SET NULL'))
     delivery_notes = db.Column(db.Text)
     pickup_notes = db.Column(db.Text)
@@ -188,6 +231,7 @@ class PurchaseRequest(db.Model):
     product = db.relationship('Product', back_populates='requests')
     delivery_address = db.relationship('Address', foreign_keys=[delivery_address_id])
     canceller = db.relationship('User', foreign_keys=[cancelled_by])
+    courier = db.relationship('User', foreign_keys=[assigned_delivery_id])
     status_history = db.relationship('RequestStatusHistory', back_populates='request',
                                       cascade='all, delete-orphan', order_by='RequestStatusHistory.created_at')
     chat = db.relationship('Chat', back_populates='request', uselist=False)
@@ -251,6 +295,39 @@ class PurchaseRequest(db.Model):
                 }
         if self.delivery_address:
             data['delivery_address'] = self.delivery_address.to_dict()
+        if self.courier:
+            data['courier'] = {'id': self.courier.id,
+                               'full_name': self.courier.full_name,
+                               'phone': self.courier.phone}
+        return data
+
+    def for_courier(self):
+        """This order as the assigned delivery account should see it.
+
+        Two things on top of [to_dict], and one thing deliberately left off.
+
+        **The customer's phone number**, because a delivery nobody answers the
+        door for is a phone call, and without it the driver rings the office to
+        have the office ring the customer.
+
+        **The cash to collect** — `total_price`, delivery charge included,
+        stated plainly so the amount asked for at the door is the amount the
+        order says. It is already in `to_dict`; naming it again as
+        `amount_to_collect` is for the driver's screen, where "total" among
+        seven other figures is how somebody asks for the wrong number.
+
+        **Never the farmer's payout.** A delivery account loads from the store
+        room and never stands at a farm gate, so it has no reason to know what
+        any farm is paid, and the field is absent from the payload rather than
+        hidden by the app.
+        """
+        data = self.to_dict()
+
+        if self.customer:
+            data.setdefault('customer', {})
+            data['customer']['phone'] = self.customer.phone
+
+        data['amount_to_collect'] = float(self.total_price or 0)
         return data
 
 
