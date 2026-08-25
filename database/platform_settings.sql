@@ -24,8 +24,21 @@ CREATE TABLE IF NOT EXISTS platform_settings (
   -- as though someone had chosen it.
   min_order_value DECIMAL(10,2) NULL,
 
+  -- The flat delivery fee. Same NULL-means-unset rule as above.
+  delivery_charge DECIMAL(10,2) NULL,
+
   updated_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  updated_by INT NULL,
+
+  -- INT UNSIGNED, matching `users.id`, and not plain INT.
+  --
+  -- This was `INT` and it is why this table did not exist for weeks. MySQL
+  -- requires a foreign key column to match the referenced column exactly, and
+  -- signed against unsigned is a mismatch — so the CREATE TABLE failed on the
+  -- constraint, no table was created, and every run since produced the same
+  -- error. The application did not notice because `min_order_value()` catches
+  -- a failed read and falls back to the configured default, so the shop kept
+  -- trading on a figure nobody could change.
+  updated_by INT UNSIGNED NULL,
 
   CONSTRAINT chk_platform_settings_singleton CHECK (id = 1),
 

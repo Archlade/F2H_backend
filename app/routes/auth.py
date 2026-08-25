@@ -57,11 +57,73 @@ def _auth_response(user, payload, status=200):
         payload['token_type'] = 'Bearer'
         payload['expires_in'] = current_app.config['JWT_ACCESS_TOKEN_EXPIRES']
     resp = jsonify(payload)
+    _clear_legacy_host_cookies(resp)
     set_access_cookies(resp, access)
     # Scoped by flask-jwt-extended to the refresh endpoint's path and paired
     # with its own CSRF cookie, so it is not sent on ordinary API calls.
     set_refresh_cookies(resp, refresh)
     return resp, status
+
+
+# Cookie names flask-jwt-extended uses. Listed rather than derived because the
+# config keys for them are only consulted if they have been overridden, and the
+# defaults are what is actually in every browser.
+_JWT_COOKIE_NAMES = (
+    'access_token_cookie',
+    'refresh_token_cookie',
+    'csrf_access_token',
+    'csrf_refresh_token',
+)
+
+
+def _clear_legacy_host_cookies(resp):
+    """Expire the host-only cookies left over from before JWT_COOKIE_DOMAIN.
+
+    Cookies are identified by (name, domain, path), so changing the domain does
+    not replace the old cookie — it adds a second one with the same name. The
+    browser then sends **both**, in an order the server does not control, and
+    whichever arrives first is the one flask-jwt-extended reads. When that is
+    the stale one, every request after a successful login is a 401.
+
+    That is why the symptom is "works in a private window, fails in the normal
+    one": a private window has no old cookie to shadow the new one. It is also
+    why it looks like a server fault when nothing on the server is wrong.
+
+    Anyone who signed in before the domain was configured is holding the stale
+    cookie right now and cannot get past the login screen — and clearing site
+    data is not something a customer will think to do. So each login expires the
+    host-only variants explicitly before setting the new ones.
+
+    Only when a domain is configured. Without one the new cookies *are*
+    host-only, and this would delete what is about to be set.
+
+    Harmless once nobody has the old cookie: expiring a cookie that does not
+    exist does nothing. Worth leaving in place rather than removing after a
+    week, because a browser that has not been opened in months still holds one.
+    """
+    if not current_app.config.get('JWT_COOKIE_DOMAIN'):
+        return
+
+    for name in _JWT_COOKIE_NAMES:
+        # domain=None makes this host-only, which is precisely the variant being
+        # cleared — the new cookie carries an explicit Domain and is a different
+        # cookie, set after this and unaffected.
+        resp.set_cookie(
+            name, '', expires=0, domain=None, path='/',
+            secure=current_app.config.get('JWT_COOKIE_SECURE', False),
+            httponly=name.startswith(('access', 'refresh')),
+            samesite=current_app.config.get('JWT_COOKIE_SAMESITE', 'Lax'),
+        )
+        # The refresh pair lives at its own path, so the root-path delete above
+        # does not reach it.
+        if 'refresh' in name:
+            resp.set_cookie(
+                name, '', expires=0, domain=None,
+                path=current_app.config.get('JWT_REFRESH_COOKIE_PATH', '/'),
+                secure=current_app.config.get('JWT_COOKIE_SECURE', False),
+                httponly=name.startswith('refresh'),
+                samesite=current_app.config.get('JWT_COOKIE_SAMESITE', 'Lax'),
+            )
 
 
 @auth_bp.route('/refresh', methods=['POST'])
