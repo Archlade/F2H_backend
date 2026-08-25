@@ -26,6 +26,16 @@ firebase-admin==7.5.0
 # delivery. Kept as a note so nobody re-adds a gateway thinking it was dropped
 # by accident.)
 
+# Building the three reports as .xlsx.
+#
+# **Not optional, unlike the Drive entries below.** `report_workbook.py` imports
+# it at module scope, so without it every download and every publish is a 500 —
+# and only at the moment somebody presses the button, because the route imports
+# the builder lazily. The app boots perfectly well and then fails on use, which
+# is how this went unnoticed: the feature was written and the dependency was
+# never declared, so a server that never ran `pip install -r` again never got it.
+openpyxl==3.1.5
+
 # Publishing the every-2-days farmer/stock report to Google Drive.
 # Only imported by app/services/drive_upload.py, and only when the job runs —
 # the app boots fine without these, it just logs that Drive is unconfigured.
