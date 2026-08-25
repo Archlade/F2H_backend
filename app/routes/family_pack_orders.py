@@ -55,6 +55,21 @@ def list_orders():
         orders, total = get_family_pack_orders_for_farmer(user_id, status, page, per_page)
     elif role in ('customer', 'farmer'):
         orders, total = get_family_pack_orders_for_customer(user_id, status, page, per_page)
+    elif role == 'delivery':
+        # Only what this account was assigned. The filter *is* the
+        # authorisation — see the twin branch in requests.list_requests.
+        query = FamilyPackOrder.query.filter(
+            FamilyPackOrder.assigned_delivery_id == user_id)
+        if status:
+            query = query.filter(FamilyPackOrder.status == status)
+        else:
+            query = query.filter(
+                FamilyPackOrder.status.notin_(['completed', 'cancelled', 'rejected']))
+        total = query.count()
+        orders = (query.order_by(FamilyPackOrder.created_at.desc())
+                  .offset((page - 1) * per_page).limit(per_page).all())
+        return jsonify(paginate_response(
+            [o.for_courier() for o in orders], total, page, per_page)), 200
     elif role == 'admin':
         query = FamilyPackOrder.query
         if status:
@@ -77,8 +92,12 @@ def get_order(order_id):
 
     # By side of the order, so a farmer can open a pack they bought.
     from ..models.request import party_for
-    if party_for(order, user_id, role) is None:
+    party = party_for(order, user_id, role)
+    if party is None:
         return jsonify({'error': 'Forbidden'}), 403
+
+    if party == 'delivery':
+        return jsonify(order.for_courier()), 200
 
     return jsonify(order.to_dict()), 200
 
