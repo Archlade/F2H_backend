@@ -73,6 +73,66 @@ def payload(module):
     return data
 
 
+def _drive_setup_reason(error):
+    """Google's own words when the refusal is something an admin can fix.
+
+    Returns None for anything else, so a genuine fault still raises and still
+    reaches the log as a crash rather than being quietly reported as "skipped".
+    Swallowing unknown errors here would hide real breakage behind a message
+    that reads like everything is fine.
+
+    Matched on the API's `reason` code rather than on the message text, because
+    the text is prose Google rewords and the code is a contract:
+
+      accessNotConfigured  the Drive API is not enabled on the project
+      notFound             the folder was never shared with the service account
+                           — Drive answers 404, not 403, for something the
+                           caller cannot see at all, so "not found" here means
+                           "not shared" rather than "wrong id"
+      forbidden /
+      insufficientPermissions
+                           shared, but read-only; it needs Editor
+    """
+    try:
+        from googleapiclient.errors import HttpError
+    except ImportError:      # library absent — nothing to interpret
+        return None
+
+    if not isinstance(error, HttpError):
+        return None
+
+    FIXABLE = {
+        'accessNotConfigured': 'The Google Drive API is not enabled for this '
+                               'project. Enable it in the Google Cloud console, '
+                               'wait a minute, and try again.',
+        'notFound': 'The Drive folder was not found. That usually means it has '
+                    'not been shared with the service account rather than that '
+                    'the id is wrong — share it as an Editor.',
+        'forbidden': 'The service account cannot write to that Drive folder. '
+                     'Share it with the service account as an Editor.',
+        'insufficientPermissions': 'The service account has read-only access to '
+                                   'that Drive folder. It needs Editor.',
+    }
+
+    try:
+        details = error.error_details or []
+        reasons = [d.get('reason') for d in details if isinstance(d, dict)]
+    except Exception:
+        reasons = []
+
+    for reason in reasons:
+        if reason in FIXABLE:
+            # Google's message names the console URL and the project number,
+            # which is more use than anything written here.
+            detail = ''
+            try:
+                detail = (error.error_details[0].get('message') or '').strip()
+            except Exception:
+                pass
+            return f'{FIXABLE[reason]} {detail}'.strip()
+    return None
+
+
 def publish(slug):
     """Build a report and put it in Google Drive. Returns a result dict.
 
@@ -105,6 +165,26 @@ def publish(slug):
     except DriveNotConfigured as e:
         logger.warning('%s not published: %s', slug, e)
         return {'skipped': True, 'reason': str(e), 'summary': counts, 'report': slug}
+    except Exception as e:
+        # Google's own refusals are setup problems too, and they were being
+        # treated as crashes.
+        #
+        # `DriveNotConfigured` covers what this side can check — no folder id,
+        # no credential file. It cannot cover the two things only Google knows:
+        # that the Drive API is not enabled on the project, and that the folder
+        # was never shared with the service account. Both came back as a 500 and
+        # "see the server log", which meant an admin had to SSH into the box and
+        # read a traceback to be told to click a button in a console.
+        #
+        # Google's message is already written for the person who has to fix it
+        # — it even carries the console URL — so it is passed through rather
+        # than replaced. Reported as `skipped`, because that is what it is: the
+        # report built fine and had nowhere to go.
+        reason = _drive_setup_reason(e)
+        if reason is None:
+            raise
+        logger.warning('%s not published: %s', slug, reason)
+        return {'skipped': True, 'reason': reason, 'summary': counts, 'report': slug}
 
     logger.info('%s published: %s', slug, counts)
     return {
