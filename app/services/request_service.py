@@ -8,7 +8,7 @@ from . import stock_service as stock
 from ..extensions import socketio
 
 
-def create_purchase_request(customer_id: int, data: dict):
+def create_purchase_request(customer_id: int, data: dict, delivery_charge: float = 0.0):
     product = Product.query.get(data['product_id'])
     if not product or not product.is_active or product.deleted_at:
         raise ValueError('Product not available')
@@ -81,6 +81,28 @@ def create_purchase_request(customer_id: int, data: dict):
                 f'₹{total:.2f} — add more to your basket to continue.'
             )
 
+    # The flat delivery fee, added after the minimum has been checked.
+    #
+    # Order matters. Checking the floor against a total that already included
+    # delivery would let the fee itself carry a too-small basket over the line —
+    # a ₹280 cart plus a ₹40 fee would pass a ₹300 minimum, which is not what
+    # "minimum order" means to anyone. The floor is about the produce.
+    #
+    # Passed in rather than read here, because the caller is the only one who
+    # knows whether this order is the one that carries it: a cart checkout fans
+    # out into one order per line and the fee belongs to the delivery, not to
+    # each line. `routes/cart.py` gives it to the first and zero to the rest.
+    #
+    # An explicit argument rather than a key in `data`. `data` is the request
+    # body on the single-product path — `routes/requests.py` hands it straight
+    # through — so a `delivery_charge` read out of it would be a number the
+    # customer chose. Every caller now has to name the figure deliberately, and
+    # the one place it can come from is `delivery_charge()` on the server.
+    delivery = 0.0
+    if data['purchase_mode'] != 'pickup':
+        delivery = round(float(delivery_charge or 0), 2)
+    total = round(total + delivery, 2)
+
     req = PurchaseRequest(
         customer_id=customer_id,
         farmer_id=product.farmer_id,
@@ -89,6 +111,7 @@ def create_purchase_request(customer_id: int, data: dict):
         unit_price=unit_price,
         subtotal=subtotal,
         discount_amount=discount,
+        delivery_charge=delivery,
         total_price=total,
         coupon_id=coupon.id if coupon else None,
         purchase_mode=data['purchase_mode'],

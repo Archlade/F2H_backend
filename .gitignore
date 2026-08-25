@@ -6,6 +6,25 @@
 # is a real credential: it can send a push to every user you have.
 *firebase-adminsdk*.json
 
+# The whole secrets directory, by location rather than by filename.
+#
+# The line above was already here on 10 August, and the key was committed
+# anyway — as `secrets/firebase-service-account.json`, which does not match
+# `*firebase-adminsdk*`. Google names the download
+# `f2happ-36e1a-firebase-adminsdk-fbsvc-<id>.json`; renaming it on the way in
+# is the natural thing to do, and it walked straight past the guard.
+#
+# Google then revoked the key for being in a public repository, and push
+# stopped working with no error anywhere — /api/health still reported
+# `configured`, because loading a key and using one are different things.
+# Cost: several days of silent notifications.
+#
+# A pattern that only holds while someone keeps Google's default filename is
+# not protection. This ignores the directory's contents outright and allows
+# back only the example, which carries no real values.
+secrets/*
+!secrets/*.example.json
+
 # Virtual environments
 .venv/
 venv/

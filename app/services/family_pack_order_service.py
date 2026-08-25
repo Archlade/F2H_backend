@@ -55,6 +55,15 @@ def create_family_pack_order(customer_id: int, data: dict):
     from .coupon_service import apply_to_total, redeem
     coupon, discount, total_price = apply_to_total(data.get('coupon_code'), subtotal)
 
+    # A basket is one order for one delivery, so it carries the flat fee once by
+    # construction — no batching to worry about, unlike the cart. Hardcoded to
+    # delivery below, so there is no pickup case to exempt here; if baskets ever
+    # gain a collection option this needs the same `!= 'pickup'` guard the
+    # request path has.
+    from ..models import delivery_charge
+    delivery = round(delivery_charge(), 2)
+    total_price = round(total_price + delivery, 2)
+
     order = FamilyPackOrder(
         customer_id=customer_id,
         farmer_id=pack.farmer_id,
@@ -62,6 +71,7 @@ def create_family_pack_order(customer_id: int, data: dict):
         unit_price=unit_price,
         subtotal=subtotal,
         discount_amount=discount,
+        delivery_charge=delivery,
         total_price=total_price,
         coupon_id=coupon.id if coupon else None,
         purchase_mode='delivery',

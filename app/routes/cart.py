@@ -24,7 +24,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
 
 from ..extensions import db
-from ..models import CartItem, Product, min_order_value
+from ..models import CartItem, Product, delivery_charge, min_order_value
 from ..services.request_service import create_purchase_request
 from ..utils.locking import lock_row
 
@@ -45,11 +45,26 @@ def _summary(customer_id):
     minimum = min_order_value()
     blocked = [i for i in items if i.problem()]
 
+    # Charged once for the whole basket, not per line — see `delivery_charge()`.
+    # Quoted here for a delivery, because that is what the cart screen defaults
+    # to; a customer who chooses pickup at checkout is not charged it, and
+    # checkout re-decides rather than trusting this figure.
+    delivery = delivery_charge()
+
     return {
         'items': [i.to_dict() for i in items],
         'count': len(items),
         'subtotal': subtotal,
+        'delivery_charge': delivery,
+        # What the customer actually pays. Pre-computed so neither client has to
+        # add it up — the same reason `short_by` is here rather than worked out
+        # twice, differently, in two codebases.
+        'total': round(subtotal + delivery, 2),
         'minimum_order_value': minimum,
+        # Deliberately against the subtotal, not the total. The delivery fee
+        # must not help a basket clear the minimum: the floor exists to say a
+        # trip is worth making for the produce involved, and a fee that grows
+        # the number it is being measured against would make it meaningless.
         'meets_minimum': subtotal >= minimum,
         # Pre-computed so the screen can say "add ₹120 more" without repeating
         # the arithmetic — and without the app and the website disagreeing about
@@ -111,7 +126,19 @@ def add_item():
 @cart_bp.route('/items/<int:item_id>', methods=['PATCH'])
 @jwt_required()
 def update_item(item_id):
-    """Set a line's quantity. Below the product's minimum removes it."""
+    """Set a line's quantity, or explain why the requested one is not allowed.
+
+    Below the farmer's minimum used to **delete the line**. The reasoning was
+    that below a minimum is not a smaller order but no order — true of a weekly
+    basket, where the only way to drop an item is to reduce it past the floor,
+    and that screen still works that way.
+
+    In a cart it is wrong. Someone tapping minus one time too many is adjusting
+    an amount, not abandoning the product, and the row vanishing under them
+    reads as a bug — they have to go and find the product again, and nothing
+    ever said why. Removing is what the bin is for; it is right there on the
+    same row.
+    """
     customer_id = int(get_jwt_identity())
     item = CartItem.query.filter_by(id=item_id, customer_id=customer_id).first_or_404()
 
@@ -121,14 +148,22 @@ def update_item(item_id):
         return jsonify({'error': 'Invalid quantity'}), 400
 
     product = item.product
-    if product and qty < float(product.min_quantity):
-        # Below the farmer's minimum is not a smaller order, it is no order.
-        db.session.delete(item)
-    elif product and qty > float(product.available_quantity):
-        return jsonify({'error': f'Only {float(product.available_quantity):g} '
-                                 f'{product.unit} available'}), 400
-    else:
-        item.quantity = qty
+    if product:
+        minimum = float(product.min_quantity)
+        if qty < minimum:
+            # Names the figure and the way out, because "not allowed" on its own
+            # leaves someone pressing a button that keeps refusing.
+            return jsonify({
+                'error': f'{product.name} is sold in a minimum of '
+                         f'{minimum:g} {product.unit}. Use the bin to remove it.',
+                'code': 'BELOW_MIN_QUANTITY',
+                'min_quantity': minimum,
+            }), 400
+        if qty > float(product.available_quantity):
+            return jsonify({'error': f'Only {float(product.available_quantity):g} '
+                                     f'{product.unit} available'}), 400
+
+    item.quantity = qty
     db.session.commit()
     return jsonify(_summary(customer_id)), 200
 
@@ -197,13 +232,31 @@ def checkout():
                      f'₹{minimum - subtotal:.2f} more.'
         }), 400
 
+    # Once for the basket, on the first order only.
+    #
+    # A cart fans out into one order per line, so a fee applied inside
+    # `create_purchase_request` would be charged once per item — five items,
+    # five delivery fees, on a single van that stops at one door. Read once
+    # here, given to the first order, and zero to every other.
+    #
+    # It lands on one order rather than being spread evenly because a fifth of
+    # a fee is not a real number: ₹40 across three lines is 13.33 three times,
+    # which is ₹39.99, and the missing paisa turns up later in a reconciliation
+    # nobody can explain. One order carries it whole.
+    #
+    # Read here rather than trusted from the cart screen for the same reason
+    # every product is re-validated above — an admin can change the figure while
+    # a cart sits open, and this is the read that decides what is charged.
+    mode = data.get('purchase_mode', 'delivery')
+    batch_delivery = 0.0 if mode == 'pickup' else delivery_charge()
+
     created = []
     try:
         for item in items:
             order = create_purchase_request(customer_id, {
                 'product_id': item.product_id,
                 'quantity': float(item.quantity),
-                'purchase_mode': data.get('purchase_mode', 'delivery'),
+                'purchase_mode': mode,
                 'delivery_address_id': data.get('delivery_address_id'),
                 'delivery_notes': data.get('delivery_notes', ''),
                 'customer_message': data.get('customer_message', ''),
@@ -216,7 +269,10 @@ def checkout():
                 # several times or silently pick a line to favour. Coupons stay
                 # on the single-product path until the rule for splitting one
                 # across orders is decided.
-            })
+            },
+                # Only the first order of the batch carries the fee.
+                delivery_charge=batch_delivery if not created else 0.0,
+            )
             created.append(order)
 
         CartItem.query.filter_by(customer_id=customer_id).delete(synchronize_session=False)
@@ -232,4 +288,8 @@ def checkout():
     return jsonify({
         'message': f'{len(created)} order{"s" if len(created) != 1 else ""} placed',
         'orders': [o.to_dict() for o in created],
+        # Reported for the whole batch, because that is the unit it was charged
+        # in. Reading it off one order would mean knowing which one carries it.
+        'delivery_charge': batch_delivery,
+        'total': round(sum(float(o.total_price) for o in created), 2),
     }), 201

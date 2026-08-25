@@ -25,6 +25,7 @@ forever.
 import logging
 import os
 import threading
+import time
 
 from flask import current_app, has_app_context
 
@@ -145,7 +146,82 @@ def push_config_problem():
         return f'FIREBASE_CREDENTIALS points at {path}, which does not exist'
     if _firebase_app() is None:
         return 'the Firebase service account was rejected — see the server log'
-    return None
+    return _credential_problem()
+
+
+# Google is only asked about the key every this-many seconds. Long enough that
+# an unauthenticated /api/health cannot be used to hammer the token endpoint,
+# short enough that a rotation shows up without a restart.
+_VERIFY_TTL = 300.0
+
+# (checked_at_monotonic, problem_or_None)
+_verify_cache = (0.0, None)
+
+
+def _credential_problem():
+    """Whether the key can actually mint an access token — not just parse.
+
+    This is the check that was missing, and its absence is why nothing caught a
+    dead credential. Everything above it is offline: is the library installed,
+    is the path set, does the file exist, did `initialize_app` accept it. A
+    service-account key that Google has **revoked** passes every one of them.
+    It is still a well-formed PEM, `credentials.Certificate()` still loads it,
+    and `initialize_app()` still succeeds — because none of that talks to
+    Google. The key is only tested when something signs a JWT with it and asks
+    for a token, which happens on the first real send, inside a background
+    greenlet, where the traceback goes to a log nobody is reading.
+
+    So `/api/health` reported ``push: configured`` for a credential that could
+    not send anything, which is worse than reporting nothing at all: it sends
+    whoever is debugging off to look at the app, the device tokens and the
+    notification channel, all of which are fine.
+
+    The usual cause of a revoked key is exposure. GitHub scans public
+    repositories for service-account keys, reports them to Google, and Google
+    disables them — often within minutes of the push, and with no notice that
+    ever reaches the person running the server.
+
+    Cached, because /api/health is unauthenticated and this makes a network
+    call. Failures are cached too: a revoked key does not un-revoke, and
+    retrying on every request would turn one dead credential into a stream of
+    outbound requests.
+    """
+    global _verify_cache
+
+    app = _firebase_app()
+    if app is None:
+        return None  # already reported by the caller
+
+    checked_at, cached = _verify_cache
+    now = time.monotonic()
+    if checked_at and (now - checked_at) < _VERIFY_TTL:
+        return cached
+
+    problem = None
+    try:
+        from google.auth.transport.requests import Request as _AuthRequest
+        app.credential.get_credential().refresh(_AuthRequest())
+    except Exception as error:
+        text = str(error)
+        if 'invalid_grant' in text or 'Invalid JWT Signature' in text:
+            problem = (
+                'Google will not accept the service-account key '
+                f'({text.splitlines()[0][:160]}). The key is well-formed, so '
+                'this is not a corrupted file — it has been revoked, or the '
+                'server clock is wrong. Google disables service-account keys '
+                'that appear in a public repository, usually within minutes. '
+                'Generate a new private key in Firebase Console → Project '
+                'settings → Service accounts, replace the file '
+                'FIREBASE_CREDENTIALS points at, restart, and delete the old '
+                'key in the console. Check `timedatectl` too: a clock more '
+                'than a few minutes out is rejected identically.'
+            )
+        else:
+            problem = f'the service-account key could not be used: {text[:200]}'
+        logger.warning('Firebase credential check failed: %s', text)
+
+    _verify_cache = (now, problem)
+    return problem
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

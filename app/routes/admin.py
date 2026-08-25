@@ -5,7 +5,8 @@ from ..utils.helpers import paginate_response, log_audit
 from ..models import (User, Role, FarmerProfile, Product, PurchaseRequest, Review, Report,
                        FeaturedFarmer, FeaturedProduct, HomepageSection, Announcement, Category,
                        FamilyPackOrder, FamilyPackSubscription, PlatformSettings)
-from ..models.settings import MIN_ORDER_FLOOR, MIN_ORDER_CEILING
+from ..models.settings import (MIN_ORDER_FLOOR, MIN_ORDER_CEILING,
+                               DELIVERY_CHARGE_FLOOR, DELIVERY_CHARGE_CEILING)
 
 from ..extensions import db
 from datetime import datetime
@@ -917,6 +918,26 @@ def update_settings():
                              f'₹{MIN_ORDER_FLOOR:.0f} and ₹{MIN_ORDER_CEILING:.0f}'
                 }), 400
             settings.min_order_value = round(value, 2)
+
+    if 'delivery_charge' in data:
+        raw = data['delivery_charge']
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            settings.delivery_charge = None
+        else:
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return jsonify({'error': 'Enter the delivery charge as a number'}), 400
+            if value != value or value in (float('inf'), float('-inf')):
+                return jsonify({'error': 'Enter the delivery charge as a number'}), 400
+            if not (DELIVERY_CHARGE_FLOOR <= value <= DELIVERY_CHARGE_CEILING):
+                # 0 is allowed here, unlike the order minimum — it is how the
+                # charge is switched off, and that is a real thing to want.
+                return jsonify({
+                    'error': f'The delivery charge must be between '
+                             f'₹{DELIVERY_CHARGE_FLOOR:.0f} and ₹{DELIVERY_CHARGE_CEILING:.0f}'
+                }), 400
+            settings.delivery_charge = round(value, 2)
 
     settings.updated_by = admin_id
     settings.updated_at = datetime.utcnow()

@@ -230,6 +230,10 @@ def create_app():
         # reach anyone, which is otherwise only discoverable by trying it.
         from .services.mail_service import mail_config_problem
         problem = mail_config_problem()
+        # Resolved once. It was called twice below, which was free while the
+        # check was offline and is not now that it verifies the key with
+        # Google.
+        push_problem = _push_problem()
         return {'status': 'ok', 'service': 'F2H API',
                 'email': 'configured' if problem is None else 'not configured',
                 # Named rather than just flagged, so a deploy check can say what
@@ -244,8 +248,8 @@ def create_app():
                 # in-app banner over Socket.IO — so without this line the only
                 # symptom is "notifications never reach the phone" and no way
                 # to tell why.
-                'push': 'configured' if _push_problem() is None else 'not configured',
-                'push_problem': _push_problem()}
+                'push': 'configured' if push_problem is None else 'not configured',
+                'push_problem': push_problem}
 
     def _push_problem():
         from .services.push_service import push_config_problem

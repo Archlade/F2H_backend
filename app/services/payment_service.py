@@ -91,6 +91,23 @@ def ensure_for_order(order):
     if amount <= 0:
         return existing
 
+    # The delivery fee is F2H's in full, so it is taken out before the split.
+    #
+    # `total_price` is what the customer hands over at the door, delivery
+    # included — that part must not change, or the collector asks for the wrong
+    # money. But splitting the whole of it would pay the farmer 80% of a fee
+    # they had nothing to do with: every delivery would quietly cost F2H four
+    # fifths of what it charged for it, and the farmer's own statement would
+    # show a figure they cannot reconcile against the produce they handed over.
+    #
+    # So the split applies to the goods, and the fee is added back to the
+    # commission side. `Payment.split` guarantees its two halves sum to what it
+    # was given, and folding delivery into commission keeps that same invariant
+    # true of the payment as a whole: commission + farmer_amount == amount.
+    # Anything reconciling the ledger against cash collected still balances.
+    delivery = money(getattr(order, 'delivery_charge', 0) or 0)
+    goods = amount - delivery
+
     rate = current_app.config.get('PLATFORM_COMMISSION_RATE', 20)
 
     # A basket F2H sells itself pays no farmer share.
@@ -104,7 +121,8 @@ def ensure_for_order(order):
     if _is_platform_sale(order):
         rate = 100
 
-    commission, farmer_share = Payment.split(amount, rate)
+    commission, farmer_share = Payment.split(goods, rate)
+    commission += delivery
 
     payment = existing or Payment(
         customer_id=order.customer_id,

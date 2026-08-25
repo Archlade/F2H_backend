@@ -99,6 +99,9 @@ class FamilyPackOrder(db.Model):
     total_price = db.Column(db.Numeric(10, 2), nullable=False)
     subtotal = db.Column(db.Numeric(10, 2))
     discount_amount = db.Column(db.Numeric(10, 2), nullable=False, default=0)
+    # See the matching column on PurchaseRequest. A basket is one order, so it
+    # carries the fee once by construction.
+    delivery_charge = db.Column(db.Numeric(10, 2), nullable=False, default=0)
     coupon_id = db.Column(db.Integer, db.ForeignKey('coupons.id', ondelete='SET NULL'))
     purchase_mode = db.Column(db.String(20), default='delivery', nullable=False)
     status = db.Column(
@@ -161,6 +164,7 @@ class FamilyPackOrder(db.Model):
             # the subtotal simply is the total.
             'subtotal': float(self.subtotal) if self.subtotal is not None else float(self.total_price),
             'discount_amount': float(self.discount_amount or 0),
+            'delivery_charge': float(self.delivery_charge or 0),
             'coupon': {
                 'id': self.coupon.id,
                 'code': self.coupon.code,

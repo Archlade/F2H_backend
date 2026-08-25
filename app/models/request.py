@@ -147,6 +147,11 @@ class PurchaseRequest(db.Model):
     total_price = db.Column(db.Numeric(10, 2), nullable=False)
     subtotal = db.Column(db.Numeric(10, 2))
     discount_amount = db.Column(db.Numeric(10, 2), nullable=False, default=0)
+    # Included in total_price, and F2H's in full — the farmer is not paid a
+    # share of it. `payment_service.freeze` subtracts this before splitting, so
+    # commission is charged on produce only. Zero on every order but the first
+    # of a cart checkout, because the fee is per delivery, not per line.
+    delivery_charge = db.Column(db.Numeric(10, 2), nullable=False, default=0)
     coupon_id = db.Column(db.Integer, db.ForeignKey('coupons.id', ondelete='SET NULL'))
     purchase_mode = db.Column(db.Enum('delivery', 'pickup'), nullable=False)
     status = db.Column(
@@ -203,6 +208,7 @@ class PurchaseRequest(db.Model):
             # the subtotal simply is the total.
             'subtotal': float(self.subtotal) if self.subtotal is not None else float(self.total_price),
             'discount_amount': float(self.discount_amount or 0),
+            'delivery_charge': float(self.delivery_charge or 0),
             'coupon': {
                 'id': self.coupon.id,
                 'code': self.coupon.code,

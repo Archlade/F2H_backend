@@ -103,6 +103,57 @@ curl -s -o /dev/null -w 'cart: %{http_code}\n' https://api.f2hmarket.com:8443/ap
 
 `401` is success here. `404` means step 1 or 2 did not take.
 
+## The Firebase key is not in git
+
+`secrets/firebase-service-account.json` is deliberately untracked, so a fresh
+clone does not have it and `git pull` will never update it. It has to be copied
+to each machine by hand, once:
+
+```bash
+scp <the-downloaded-key>.json \
+    root@srv1611182:/srv/webapps/farmapp/secrets/firebase-service-account.json
+
+# on the server
+chmod 600 /srv/webapps/farmapp/secrets/firebase-service-account.json
+sudo systemctl restart farmapp
+```
+
+`secrets/firebase-service-account.example.json` is committed and shows the
+expected shape. The real file is a credential that can push a notification to
+every user you have.
+
+**Why it is not simply committed with everything else.** It was, once. Google
+revoked it for appearing in a public repository — that is automatic and takes
+minutes — and push then failed with `invalid_grant: Invalid JWT Signature`
+while every other check reported healthy. Nothing surfaced it, because loading
+a key and using one are different operations and only the first was being
+checked. Several days of silent notifications.
+
+**Verifying it works**, which `/api/health` now does for you:
+
+```bash
+curl -s https://api.f2hmarket.com:8443/api/health
+# "push": "configured"  — the key was accepted by Google within the last 5 min
+# "push_problem": …     — names the fault, including a revoked key
+```
+
+For a real end-to-end test, the admin Settings screen has **Send a test
+notification**, or from the server:
+
+```bash
+cd /srv/webapps/farmapp && venv/bin/python3 -c "
+from run import app
+from app.services.push_service import send_to_user
+with app.app_context():
+    print('devices reached:', send_to_user(<your-user-id>, 'F2H test', 'Direct send'))
+"
+```
+
+**If you ever rotate it**, delete the old key afterwards in
+[IAM → Service Accounts](https://console.cloud.google.com/iam-admin/serviceaccounts?project=f2happ-36e1a)
+→ `firebase-adminsdk-fbsvc@…` → Keys. A revoked key left listed makes the next
+incident harder to read.
+
 ## Scheduled work
 
 Nothing in this app runs on a timer by itself. Weekly deliveries are generated

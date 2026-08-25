@@ -23,4 +23,4 @@ from .family_pack import (FamilyPack, FamilyPackItem, FamilyPackOrder,
 from .coupon import Coupon, CouponRedemption
 
 from .cart import CartItem
-from .settings import PlatformSettings, min_order_value
+from .settings import PlatformSettings, delivery_charge, min_order_value

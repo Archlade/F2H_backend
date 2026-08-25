@@ -155,6 +155,16 @@ class Config:
     # goes through `min_order_value()` in app/models/settings.py.
     MIN_ORDER_VALUE = float(os.environ.get('MIN_ORDER_VALUE', 300))
 
+    # Flat delivery fee, charged once per checkout and never on a pickup order.
+    #
+    # Defaults to 0 — the feature is off until an admin sets a figure on the
+    # admin page. A deploy that silently started adding money to every bill
+    # would be a worse bug than the feature is a feature, so the default has to
+    # be the harmless one. Same arrangement as MIN_ORDER_VALUE above: this is
+    # the fallback, `delivery_charge()` in app/models/settings.py is the figure
+    # everything actually reads.
+    DELIVERY_CHARGE = float(os.environ.get('DELIVERY_CHARGE', 0))
+
     # Push notifications — optional, like email. Without a credential the app
     # still creates every notification row and still delivers over Socket.IO;
     # only the push to a backgrounded phone is missing.

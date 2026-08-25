@@ -37,7 +37,12 @@ def create_request():
         return jsonify({'error': 'delivery_address_id is required for delivery'}), 400
 
     try:
-        req = create_purchase_request(user_id, data)
+        # A single-product order is its own checkout, so it carries the fee
+        # once. Read from the server here — never from `data`, which is the
+        # request body and would let the customer name their own delivery
+        # charge. The service exempts pickup.
+        from ..models import delivery_charge
+        req = create_purchase_request(user_id, data, delivery_charge=delivery_charge())
         return jsonify(req.to_dict()), 201
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
