@@ -44,6 +44,15 @@ def get_products(filters: dict, customer_lat=None, customer_lon=None, page=1, pe
     # would quietly offer the *rejected* list to a basket builder.
     if filters.get('basket_eligible'):
         query = query.filter(Product.basket_eligible == True)
+    else:
+        # Basket-only items are invisible everywhere else.
+        #
+        # In the `else` rather than as a blanket filter: a basket builder asks
+        # for `basket_eligible=true` and must see them, while every other
+        # caller — the marketplace, search, a farm's shopfront, related
+        # products — must not. Excluding them unconditionally would empty the
+        # basket catalogue, which is the only place they belong.
+        query = query.filter(Product.basket_only == False)
     if filters.get('delivery_available'):
         query = query.filter(Product.delivery_available == True)
     if filters.get('pickup_available'):

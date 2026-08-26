@@ -20,6 +20,16 @@ def create_purchase_request(customer_id: int, data: dict, delivery_charge: float
     if product.farmer_id == customer_id:
         raise ValueError('This is your own listing')
 
+    # Basket-only items cannot be bought one at a time.
+    #
+    # They are sourced by F2H against the baskets that were ordered, and there
+    # is no farm behind one to accept a request or pick it. `product_service`
+    # already hides them from every listing, so reaching here means a stale
+    # screen or a hand-made request — either way it stops here rather than
+    # creating an order nobody can fulfil.
+    if getattr(product, 'basket_only', False):
+        raise ValueError(f'{product.name} is only available as part of a weekly basket')
+
     if product.stock_status == 'out_of_stock':
         raise ValueError('Product is out of stock')
 

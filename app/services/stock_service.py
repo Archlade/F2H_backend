@@ -65,6 +65,19 @@ def commit(product, quantity):
     if quantity <= 0:
         return
 
+    # A basket-only item has no stock to take.
+    #
+    # F2H buys these in against the baskets that were actually ordered, so
+    # `available_quantity` on one is not a number anybody maintains — it sits at
+    # whatever it was created with, usually 0. Running the deduction below would
+    # read that as "none left" and refuse to confirm the basket, which is the
+    # opposite of what an unlimited item means.
+    #
+    # Returning early rather than special-casing the UPDATE keeps the atomic
+    # path untouched for everything that does have a shelf behind it.
+    if getattr(product, 'basket_only', False):
+        return
+
     # The WHERE clause is the whole point: it is evaluated by the database
     # against the latest committed row, not against whatever this session read
     # a moment ago.
@@ -86,11 +99,18 @@ def commit(product, quantity):
 def restore(product, quantity):
     """Put `quantity` back — a confirmed order that was later cancelled.
 
+    Basket-only items are skipped here for the same reason as in [commit]:
+    nothing was taken, so nothing goes back. Restoring one would invent stock
+    that never existed and slowly inflate a figure nobody reads.
+
     Deliberately unconditional: there is no upper bound to check against, and
     refusing to restore stock would lose a farmer real inventory.
     """
     quantity = float(quantity)
     if quantity <= 0:
+        return
+
+    if getattr(product, 'basket_only', False):
         return
 
     (db.session.query(Product)

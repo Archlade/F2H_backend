@@ -1090,6 +1090,166 @@ def publish_one_report(slug):
     return jsonify(result), 200
 
 
+# ── Weekly basket items ────────────────────────────────────────────────────────
+#
+# Items F2H sells inside a weekly basket, created here rather than listed by a
+# farm. They are ordinary `Product` rows so that everything already built —
+# categories, images, the basket builders on both clients, the buying-plan
+# report — keeps working without a second kind of thing to teach it about.
+#
+# What makes one different is three flags set together, and never by hand:
+#   basket_eligible  may go in a basket
+#   basket_only      may go nowhere else
+#   farmer_id        the platform seller account, not a real farm
+@admin_bp.route('/basket-items', methods=['GET'])
+@jwt_required()
+@admin_required
+def list_basket_items():
+    """Every basket item, newest first."""
+    rows = (Product.query
+            .filter(Product.basket_only.is_(True), Product.deleted_at.is_(None))
+            .order_by(Product.created_at.desc()).all())
+    return jsonify([p.to_dict() for p in rows]), 200
+
+
+@admin_bp.route('/basket-items', methods=['POST'])
+@jwt_required()
+@admin_required
+def create_basket_item():
+    """Create an item that exists only inside weekly baskets.
+
+    Owned by the platform seller rather than by the admin who typed it in. An
+    admin's own user id here would put the item on that person's shopfront and
+    make them the seller of record on every basket containing it — including
+    the farmer's share of the money. `platform_seller()` fails loudly when
+    unconfigured rather than picking someone, which is the behaviour worth
+    keeping.
+
+    `available_quantity` is accepted but not meaningful: these are sourced
+    against the baskets actually ordered, and `stock_service` skips them. It is
+    stored so the field is not surprising if somebody looks, and defaulted high
+    so any code path that still reads it does not conclude "out of stock".
+    """
+    from ..services.platform_seller import platform_seller
+
+    data = request.get_json(silent=True) or {}
+
+    for field in ('name', 'price', 'unit', 'category_id'):
+        if data.get(field) in (None, ''):
+            return jsonify({'error': f'{field.replace("_", " ")} is required'}), 400
+
+    try:
+        price = round(float(data['price']), 2)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Enter the price as a number'}), 400
+    if price <= 0:
+        return jsonify({'error': 'The price must be more than zero'}), 400
+
+    if not Category.query.get(data['category_id']):
+        return jsonify({'error': 'That category does not exist'}), 400
+
+    try:
+        seller = platform_seller()
+    except Exception as e:
+        # The message names PLATFORM_SELLER_EMAIL and what to set it to.
+        return jsonify({'error': str(e)}), 400
+
+    product = Product(
+        farmer_id=seller.id,
+        name=str(data['name']).strip(),
+        description=(data.get('description') or '').strip(),
+        category_id=data['category_id'],
+        price=price,
+        unit=str(data['unit']).strip(),
+        min_quantity=float(data.get('min_quantity') or 1),
+        available_quantity=float(data.get('available_quantity') or 999999),
+        is_active=True,
+        # Admin-created, so there is nobody to approve it and no queue to sit in.
+        is_approved=True,
+        basket_eligible=True,
+        basket_only=True,
+        delivery_available=True,
+        pickup_available=False,
+    )
+    db.session.add(product)
+    db.session.flush()
+    product.update_stock_status()
+
+    log_audit(_get_admin_id(), 'create_basket_item', 'product', product.id,
+              new_data={'name': product.name, 'price': float(product.price)})
+    db.session.commit()
+
+    return jsonify(product.to_dict()), 201
+
+
+@admin_bp.route('/basket-items/<int:product_id>', methods=['PATCH'])
+@jwt_required()
+@admin_required
+def update_basket_item(product_id):
+    """Change a basket item's name, price, unit, minimum or category."""
+    product = Product.query.filter_by(id=product_id, basket_only=True).first()
+    if product is None:
+        return jsonify({'error': 'That is not a basket item'}), 404
+
+    data = request.get_json(silent=True) or {}
+    before = {'name': product.name, 'price': float(product.price)}
+
+    if 'price' in data:
+        try:
+            price = round(float(data['price']), 2)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Enter the price as a number'}), 400
+        if price <= 0:
+            return jsonify({'error': 'The price must be more than zero'}), 400
+        product.price = price
+
+    if 'category_id' in data and data['category_id']:
+        if not Category.query.get(data['category_id']):
+            return jsonify({'error': 'That category does not exist'}), 400
+        product.category_id = data['category_id']
+
+    for field in ('name', 'unit', 'description'):
+        if field in data and str(data[field]).strip():
+            setattr(product, field, str(data[field]).strip())
+
+    if 'min_quantity' in data:
+        try:
+            product.min_quantity = float(data['min_quantity'])
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Enter the minimum as a number'}), 400
+
+    if 'is_active' in data:
+        product.is_active = bool(data['is_active'])
+
+    log_audit(_get_admin_id(), 'update_basket_item', 'product', product.id,
+              old_data=before, new_data={'name': product.name, 'price': float(product.price)})
+    db.session.commit()
+
+    return jsonify(product.to_dict()), 200
+
+
+@admin_bp.route('/basket-items/<int:product_id>', methods=['DELETE'])
+@jwt_required()
+@admin_required
+def retire_basket_item(product_id):
+    """Retire an item. Soft delete, because baskets already reference it.
+
+    A hard delete would orphan every subscription line and order row pointing at
+    it. Deactivating takes it out of the builder while leaving the history of
+    what people were actually sold intact.
+    """
+    product = Product.query.filter_by(id=product_id, basket_only=True).first()
+    if product is None:
+        return jsonify({'error': 'That is not a basket item'}), 404
+
+    product.is_active = False
+    log_audit(_get_admin_id(), 'retire_basket_item', 'product', product.id,
+              old_data={'name': product.name})
+    db.session.commit()
+
+    return jsonify({'id': product.id, 'is_active': False}), 200
+
+
 # ── Delivery partners ──────────────────────────────────────────────────────────
 @admin_bp.route('/delivery-partners', methods=['GET'])
 @jwt_required()
