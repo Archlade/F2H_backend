@@ -167,11 +167,36 @@ def set_product_images(product, data: dict) -> bool:
     return True
 
 
+def unique_slug(name: str, farmer_id: int) -> str:
+    """A slug for a product, never null and not already used by this seller.
+
+    `products.slug` is NOT NULL, so every path that inserts a Product owes it a
+    value. Admin-created basket items skipped this and every save died on
+    `Column 'slug' cannot be null` — a 500 that said nothing about slugs to the
+    person clicking Add.
+
+    Two things the old inline version got wrong:
+
+    * A name that slugifies to nothing. `slugify` strips anything it cannot
+      transliterate, so a product named only in Malayalam or Devanagari can come
+      back as an empty string — which is not null and so passes the constraint,
+      leaving a row with a blank slug. Falls back to 'item'.
+
+    * Collisions past the first. It appended the farmer id once, so a seller
+      with two products of the same name still produced the same slug twice.
+      Basket items make that the normal case rather than the exception, because
+      every one of them belongs to the single platform seller.
+    """
+    base = slugify(name or '') or 'item'
+    slug, n = base, 2
+    while Product.query.filter_by(slug=slug, farmer_id=farmer_id).first() is not None:
+        slug = f"{base}-{n}"
+        n += 1
+    return slug
+
+
 def create_product(farmer_id: int, data: dict):
-    slug = slugify(data['name'])
-    existing = Product.query.filter_by(slug=slug, farmer_id=farmer_id).first()
-    if existing:
-        slug = f"{slug}-{farmer_id}"
+    slug = unique_slug(data['name'], farmer_id)
 
     product = Product(
         farmer_id=farmer_id,

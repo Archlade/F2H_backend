@@ -10,7 +10,7 @@ from ..models.settings import (MIN_ORDER_FLOOR, MIN_ORDER_CEILING,
 
 from ..extensions import db, socketio
 from ..services.notification_service import create_notification
-from ..services.product_service import set_product_images
+from ..services.product_service import set_product_images, unique_slug
 from datetime import datetime
 from urllib.parse import quote
 from sqlalchemy import func
@@ -1235,9 +1235,15 @@ def create_basket_item():
         # The message names PLATFORM_SELLER_EMAIL and what to set it to.
         return jsonify({'error': str(e)}), 400
 
+    name = str(data['name']).strip()
+
     product = Product(
         farmer_id=seller.id,
-        name=str(data['name']).strip(),
+        name=name,
+        # NOT NULL, and this path never set it — every basket item died on
+        # `Column 'slug' cannot be null`. Every basket item belongs to the one
+        # platform seller, so collisions are routine and the helper counts.
+        slug=unique_slug(name, seller.id),
         description=(data.get('description') or '').strip(),
         category_id=data['category_id'],
         price=price,
