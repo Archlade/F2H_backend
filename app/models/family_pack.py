@@ -6,7 +6,15 @@ class FamilyPack(db.Model):
     __tablename__ = 'family_packs'
 
     id = db.Column(db.Integer, primary_key=True)
-    farmer_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    # Nullable: an F2H-sold basket has no farm behind it. The customer builds
+    # from the whole catalogue and F2H sources the items, so there is no single
+    # seller to name — `create_subscription` sets this to None on purpose and
+    # every reader already branches on it (`if sub.farmer_id is not None`).
+    #
+    # It stayed NOT NULL after the single-farm basket was removed, which made
+    # every new basket die on `Column 'farmer_id' cannot be null`. Legacy rows
+    # from the single-farm days keep their farmer and keep working.
+    farmer_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=True)
     name = db.Column(db.String(200), nullable=False)
     slug = db.Column(db.String(250), nullable=False)
     description = db.Column(db.Text)

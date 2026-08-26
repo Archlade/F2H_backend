@@ -735,6 +735,82 @@ def list_all_orders():
     return jsonify(paginate_response(rows[start:start + per_page], total, page, per_page)), 200
 
 
+@admin_bp.route('/orders/<string:kind>/<int:order_id>/items', methods=['GET'])
+@jwt_required()
+@admin_required
+def order_items(kind, order_id):
+    """What is actually in an order: products and quantities.
+
+    Its own endpoint rather than a field on `/admin/orders`, because that list
+    reads up to 500 rows of each kind before slicing to a page. Attaching lines
+    there would fetch the contents of five hundred orders to display twenty, and
+    every one of them a separate query for its items.
+
+    Both spellings of the basket are accepted, matching `/assign` — the list
+    labels these rows `pack-order` and the rest of this file says basket.
+
+    A request is a single product, so it has exactly one line. A basket has no
+    lines of its own: the row links to the subscription it was generated from,
+    or to a fixed pack on the older ones, and the items live there.
+    """
+    if kind == 'request':
+        req = PurchaseRequest.query.get_or_404(order_id)
+        product = req.product
+        return jsonify({
+            'id': req.id,
+            'kind': 'request',
+            'items': [{
+                'product_id': req.product_id,
+                'name': product.name if product else f'Product #{req.product_id}',
+                'unit': product.unit if product else None,
+                'primary_image': (product.primary_image.image_url
+                                  if product and product.primary_image else None),
+                'quantity': float(req.quantity),
+                'unit_price': float(req.unit_price),
+                'line_total': float(req.total_price),
+            }],
+        }), 200
+
+    if kind not in ('basket', 'pack-order'):
+        return jsonify({'error': "kind must be 'request' or 'pack-order'"}), 400
+
+    order = FamilyPackOrder.query.get_or_404(order_id)
+
+    # Subscription first, pack second. A basket generated from a subscription is
+    # the normal case now; `pack_id` is only set on rows from the fixed-pack
+    # days, and those still have to open.
+    source = order.subscription or order.pack
+    rows = list(source.items) if source is not None else []
+
+    items = []
+    for line in rows:
+        product = line.product
+        price = float(product.effective_price) if product else 0.0
+        quantity = float(line.quantity)
+        items.append({
+            'product_id': line.product_id,
+            'name': product.name if product else f'Product #{line.product_id}',
+            'unit': line.unit or (product.unit if product else None),
+            'primary_image': (product.primary_image.image_url
+                              if product and product.primary_image else None),
+            'quantity': quantity,
+            'unit_price': price,
+            'line_total': round(price * quantity, 2),
+        })
+
+    return jsonify({
+        'id': order.id,
+        'kind': 'pack-order',
+        # Said plainly rather than left to be inferred from an empty list. A
+        # basket whose subscription was deleted is not the same thing as a
+        # basket with nothing in it, and an admin chasing a delivery needs to
+        # know which they are looking at.
+        'source': ('subscription' if order.subscription is not None
+                   else 'pack' if order.pack is not None else None),
+        'items': items,
+    }), 200
+
+
 @admin_bp.route('/family-pack-subscriptions', methods=['GET'])
 @jwt_required()
 @admin_required
