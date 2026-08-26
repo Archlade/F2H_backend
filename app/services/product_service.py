@@ -142,6 +142,31 @@ def image_urls_from(data: dict) -> list:
     return urls
 
 
+def set_product_images(product, data: dict) -> bool:
+    """Replace a product's photos with whatever the client sent.
+
+    Only when the client actually said something about images. Absent keys mean
+    "leave them alone" — a form that edits only the price must not silently
+    strip the photos — while an explicit empty list means "remove them all",
+    which is how the last picture gets deleted.
+
+    First one wins `is_primary`, so reordering in the form reorders the listing.
+    The delete-orphan cascade on `Product.images` removes the rows that are no
+    longer listed, so this is a replace rather than an append.
+
+    Shared because basket items are Products too, and this went in three places
+    before it went in one. Returns whether anything was touched.
+    """
+    if 'image_urls' not in data and 'images' not in data:
+        return False
+
+    product.images = [
+        ProductImage(image_url=url, is_primary=(idx == 0), sort_order=idx)
+        for idx, url in enumerate(image_urls_from(data))
+    ]
+    return True
+
+
 def create_product(farmer_id: int, data: dict):
     slug = slugify(data['name'])
     existing = Product.query.filter_by(slug=slug, farmer_id=farmer_id).first()
@@ -160,6 +185,7 @@ def create_product(farmer_id: int, data: dict):
         available_quantity=data.get('available_quantity', 0),
         is_organic=data.get('is_organic', False),
         is_natural=data.get('is_natural', False),
+        is_homemade=data.get('is_homemade', False),
         is_farm_grown=data.get('is_farm_grown', True),
         delivery_available=data.get('delivery_available', True),
         pickup_available=data.get('pickup_available', True),
@@ -188,19 +214,13 @@ def update_product(product_id: int, farmer_id: int, data: dict):
         return None
 
     allowed = ['name', 'description', 'price', 'unit', 'min_quantity', 'available_quantity',
-               'is_organic', 'is_natural', 'is_farm_grown', 'delivery_available',
+               'is_organic', 'is_natural', 'is_farm_grown', 'is_homemade', 'delivery_available',
                'pickup_available', 'is_active', 'category_id', 'low_stock_threshold']
     for field in allowed:
         if field in data:
             setattr(product, field, data[field])
 
-    # Replace the image set when the client sends one
-    if 'image_urls' in data or 'images' in data:
-        # delete-orphan cascade removes the rows that are no longer listed
-        product.images = [
-            ProductImage(image_url=url, is_primary=(idx == 0), sort_order=idx)
-            for idx, url in enumerate(image_urls_from(data))
-        ]
+    set_product_images(product, data)
 
     product.update_stock_status()
     db.session.commit()

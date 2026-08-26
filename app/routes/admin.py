@@ -8,7 +8,9 @@ from ..models import (User, Role, FarmerProfile, Product, PurchaseRequest, Revie
 from ..models.settings import (MIN_ORDER_FLOOR, MIN_ORDER_CEILING,
                                DELIVERY_CHARGE_FLOOR, DELIVERY_CHARGE_CEILING)
 
-from ..extensions import db
+from ..extensions import db, socketio
+from ..services.notification_service import create_notification
+from ..services.product_service import set_product_images
 from datetime import datetime
 from urllib.parse import quote
 from sqlalchemy import func
@@ -1254,6 +1256,11 @@ def create_basket_item():
     db.session.flush()
     product.update_stock_status()
 
+    # After the flush, because ProductImage rows need the product's id. Same
+    # helper the farmer product form goes through, so all three payload shapes
+    # work here too and a basket item photographs like any other listing.
+    set_product_images(product, data)
+
     log_audit(_get_admin_id(), 'create_basket_item', 'product', product.id,
               new_data={'name': product.name, 'price': float(product.price)})
     db.session.commit()
@@ -1299,6 +1306,10 @@ def update_basket_item(product_id):
 
     if 'is_active' in data:
         product.is_active = bool(data['is_active'])
+
+    # Absent means "leave the photos alone", so editing just the price from a
+    # form that does not carry them cannot wipe them.
+    set_product_images(product, data)
 
     log_audit(_get_admin_id(), 'update_basket_item', 'product', product.id,
               old_data=before, new_data={'name': product.name, 'price': float(product.price)})
@@ -1439,6 +1450,11 @@ def assign_delivery(kind, order_id):
     order = model.query.get_or_404(order_id)
     raw = data.get('delivery_id')
 
+    # Read before the write below overwrites it. Reassigning an order is two
+    # events, not one — somebody gains a stop and somebody else loses it — and
+    # the one losing it is the person most in need of being told.
+    previous_id = order.assigned_delivery_id
+
     if raw is None:
         order.assigned_delivery_id = None
         assignee = None
@@ -1456,8 +1472,44 @@ def assign_delivery(kind, order_id):
             return jsonify({'error': 'That delivery account is deactivated'}), 400
         order.assigned_delivery_id = assignee.id
 
-    log_audit(_get_admin_id(), 'assign_delivery', kind, order_id,
+    admin_id = _get_admin_id()
+    log_audit(admin_id, 'assign_delivery', kind, order_id,
               new_data={'delivery_id': order.assigned_delivery_id})
+
+    # Told, not left to discover it. A courier is out with the phone in a
+    # pocket; an assignment nobody announces is one that sits until they happen
+    # to pull the list. `create_notification` queues the push and leaves it to
+    # the commit below, so nothing is sent if that commit fails.
+    #
+    # `order_id` rather than `request_id` for both kinds: this account has one
+    # screen, so the payload only has to say which order, never where to go.
+    payload = {'order_id': order.id, 'kind': kind}
+    noun = 'basket' if model is FamilyPackOrder else 'order'
+
+    # Guarded on a real change. Re-saving the same courier — which the admin
+    # screen allows — should not buzz a phone for nothing.
+    if assignee is not None and assignee.id != previous_id:
+        create_notification(
+            assignee.id, admin_id, 'delivery_assigned',
+            'New delivery assigned',
+            f"You have a new {noun} to deliver. Open the app for the address "
+            f"and the amount to collect.",
+            payload)
+        socketio.emit('new_notification',
+                      {'type': 'delivery_assigned', **payload},
+                      room=f"user_{assignee.id}")
+
+    if previous_id and previous_id != order.assigned_delivery_id:
+        create_notification(
+            previous_id, admin_id, 'delivery_unassigned',
+            'A delivery was reassigned',
+            f"The {noun} you were carrying has been given to someone else. "
+            f"Nothing further is needed from you.",
+            payload)
+        socketio.emit('new_notification',
+                      {'type': 'delivery_unassigned', **payload},
+                      room=f"user_{previous_id}")
+
     db.session.commit()
 
     return jsonify({'id': order.id, 'kind': kind,

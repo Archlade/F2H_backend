@@ -18,6 +18,9 @@ class Product(db.Model):
     is_organic = db.Column(db.Boolean, default=False)
     is_natural = db.Column(db.Boolean, default=False)
     is_farm_grown = db.Column(db.Boolean, default=True)
+    # Made rather than grown — jam, pickle, ghee, honey. Not exclusive with
+    # the flags above: a home-made jam can also be organic.
+    is_homemade = db.Column(db.Boolean, default=False)
     delivery_available = db.Column(db.Boolean, default=True)
     pickup_available = db.Column(db.Boolean, default=True)
     is_active = db.Column(db.Boolean, default=True)
@@ -100,6 +103,7 @@ class Product(db.Model):
             'is_organic': self.is_organic,
             'is_natural': self.is_natural,
             'is_farm_grown': self.is_farm_grown,
+            'is_homemade': self.is_homemade,
             'delivery_available': self.delivery_available,
             'pickup_available': self.pickup_available,
             'is_active': self.is_active,
