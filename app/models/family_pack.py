@@ -276,6 +276,17 @@ class FamilyPackSubscription(db.Model):
     # honours it, so a subscription in flight keeps running across the change
     # rather than breaking on it.
     farmer_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+    # The courier who normally carries this basket.
+    #
+    # A weekly basket goes to the same door every week, so the round is usually
+    # the same person's. Set once here and every generated delivery inherits it;
+    # any single week can still be reassigned on the order itself, which is what
+    # covers illness and holidays.
+    #
+    # SET NULL, not CASCADE: retiring a delivery account must not delete the
+    # customer's standing order along with it.
+    assigned_delivery_id = db.Column(
+        db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), index=True)
     delivery_address_id = db.Column(db.Integer, db.ForeignKey('addresses.id', ondelete='SET NULL'))
     # 0 = Monday ... 6 = Sunday, matching datetime.date.weekday()
     delivery_weekday = db.Column(db.Integer, nullable=False)
@@ -306,6 +317,7 @@ class FamilyPackSubscription(db.Model):
     delivery_address = db.relationship('Address', foreign_keys=[delivery_address_id])
     items = db.relationship('FamilyPackSubscriptionItem', back_populates='subscription',
                             cascade='all, delete-orphan')
+    courier = db.relationship('User', foreign_keys=[assigned_delivery_id])
     deliveries = db.relationship('FamilyPackOrder', back_populates='subscription',
                                  order_by='FamilyPackOrder.delivery_date')
 
@@ -393,6 +405,8 @@ class FamilyPackSubscription(db.Model):
                 'applied': self.coupon_applied,
                 'discount': float(self.coupon_discount or 0),
             } if self.coupon else None,
+            'assigned_delivery_id': self.assigned_delivery_id,
+            'courier_name': self.courier.full_name if self.courier else None,
             'deliveries_count': len(self.deliveries),
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }

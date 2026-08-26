@@ -395,6 +395,12 @@ def _create_delivery(sub, delivery_date):
         status='admin_review' if hold_reason else 'confirmed',
         hold_reason=hold_reason,
         delivery_address_id=sub.delivery_address_id,
+        # Inherited, so a standing weekly round arrives already allocated
+        # instead of an admin picking the same courier for the same customer
+        # every week. Copied rather than looked up later: reassigning the
+        # basket should change future deliveries, not rewrite the ones already
+        # generated and possibly already out on a van.
+        assigned_delivery_id=sub.assigned_delivery_id,
         delivery_notes=sub.delivery_notes,
         customer_message=sub.customer_message,
         # The deduction above is part of this transaction, so if anything below

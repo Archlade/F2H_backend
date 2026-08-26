@@ -735,6 +735,51 @@ def list_all_orders():
     return jsonify(paginate_response(rows[start:start + per_page], total, page, per_page)), 200
 
 
+@admin_bp.route('/family-pack-subscriptions/<int:subscription_id>/assign', methods=['PATCH'])
+@jwt_required()
+@admin_required
+def assign_basket_courier(subscription_id):
+    """Give a weekly basket a standing courier, or take it back.
+
+    Applies to deliveries generated *from now on*. Deliveries already created
+    keep whoever they were assigned at the time — some of them are out on a van,
+    and silently moving those would change who is accountable for cash already
+    collected. Reassign an individual week on the order itself.
+
+    A null `delivery_id` clears it, which is how a basket returns to the pool.
+    """
+    data = request.get_json(silent=True) or {}
+    sub = FamilyPackSubscription.query.get_or_404(subscription_id)
+    raw = data.get('delivery_id')
+
+    if raw is None:
+        sub.assigned_delivery_id = None
+        assignee = None
+    else:
+        # Same check as the per-order assign: without it an admin could name any
+        # user id at all, and `party_for` would then hand that account delivery
+        # powers over every basket this subscription generates.
+        assignee = (User.query.join(Role, User.role_id == Role.id)
+                    .filter(User.id == raw, Role.name == 'delivery',
+                            User.deleted_at.is_(None))
+                    .first())
+        if assignee is None:
+            return jsonify({'error': 'That is not a delivery account'}), 400
+        if not assignee.is_active:
+            return jsonify({'error': 'That delivery account is deactivated'}), 400
+        sub.assigned_delivery_id = assignee.id
+
+    log_audit(_get_admin_id(), 'assign_basket_courier', 'family_pack_subscription',
+              sub.id, new_data={'delivery_id': sub.assigned_delivery_id})
+    db.session.commit()
+
+    return jsonify({
+        'id': sub.id,
+        'assigned_delivery_id': sub.assigned_delivery_id,
+        'courier_name': assignee.full_name if assignee else None,
+    }), 200
+
+
 @admin_bp.route('/orders/<string:kind>/<int:order_id>/items', methods=['GET'])
 @jwt_required()
 @admin_required
