@@ -72,6 +72,12 @@ class ServiceReview(db.Model):
                 'display_name': f"{self.author.first_name} {last[:1]}.".strip()
                                 if last else self.author.first_name,
                 'avatar_url': self.author.avatar_url,
+                # Customers and farmers both leave feedback, and the two read
+                # very differently on a homepage — "the vegetables were fresh"
+                # against "F2H sells what I grow". Published so the page can
+                # say which it is instead of calling everyone a customer.
+                # A role, not personal information.
+                'role': self.author.role_name,
             }
         return data
 
