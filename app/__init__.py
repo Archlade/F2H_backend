@@ -40,6 +40,7 @@ def create_app():
     from .routes.notifications import notifications_bp
     from .routes.devices import devices_bp
     from .routes.reviews import reviews_bp
+    from .routes.service_reviews import service_reviews_bp
     from .routes.favorites import favorites_bp
     from .routes.categories import categories_bp
     from .routes.locations import locations_bp
@@ -66,6 +67,7 @@ def create_app():
     app.register_blueprint(notifications_bp, url_prefix='/api/notifications')
     app.register_blueprint(devices_bp, url_prefix='/api/devices')
     app.register_blueprint(reviews_bp, url_prefix='/api/reviews')
+    app.register_blueprint(service_reviews_bp, url_prefix='/api/service-reviews')
     app.register_blueprint(favorites_bp, url_prefix='/api/favorites')
     app.register_blueprint(categories_bp, url_prefix='/api/categories')
     app.register_blueprint(locations_bp, url_prefix='/api/locations')

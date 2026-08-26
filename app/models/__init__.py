@@ -25,3 +25,4 @@ from .coupon import Coupon, CouponRedemption
 from .cart import CartItem
 from .settings import PlatformSettings, delivery_charge, min_order_value
 from .delivery_remittance import DeliveryRemittance
+from .service_review import ServiceReview

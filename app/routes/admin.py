@@ -1090,6 +1090,85 @@ def publish_one_report(slug):
     return jsonify(result), 200
 
 
+# ── Service reviews ────────────────────────────────────────────────────────────
+#
+# Feedback about F2H itself, as opposed to `/admin/reviews`, which moderates what
+# customers said about a *product*. Two different things that both got called
+# reviews; this one decides what appears on the homepage.
+@admin_bp.route('/service-reviews', methods=['GET'])
+@jwt_required()
+@admin_required
+def list_service_reviews():
+    """Every service review, waiting ones first.
+
+    Pending before approved, because this is a queue: the reason to open it is
+    the thing nobody has looked at yet.
+    """
+    from ..models import ServiceReview
+
+    status = request.args.get('status')
+    query = ServiceReview.query
+    if status == 'pending':
+        query = query.filter(ServiceReview.is_approved.is_(False))
+    elif status == 'approved':
+        query = query.filter(ServiceReview.is_approved.is_(True))
+
+    rows = query.order_by(ServiceReview.is_approved.asc(),
+                          ServiceReview.updated_at.desc()).limit(200).all()
+
+    pending = ServiceReview.query.filter(ServiceReview.is_approved.is_(False)).count()
+    approved = ServiceReview.query.filter(ServiceReview.is_approved.is_(True)).count()
+
+    return jsonify({
+        'items': [r.to_admin_dict() for r in rows],
+        'counts': {'pending': pending, 'approved': approved},
+    }), 200
+
+
+@admin_bp.route('/service-reviews/<int:review_id>/approve', methods=['PATCH'])
+@jwt_required()
+@admin_required
+def approve_service_review(review_id):
+    """Publish a review to the homepage, or take it back down.
+
+    Toggles, so the same control both approves and unpublishes — an approval
+    that cannot be undone is one nobody wants to make.
+    """
+    from ..models import ServiceReview
+
+    row = ServiceReview.query.get_or_404(review_id)
+    row.is_approved = not row.is_approved
+    row.approved_by = _get_admin_id() if row.is_approved else None
+    row.approved_at = datetime.utcnow() if row.is_approved else None
+
+    log_audit(_get_admin_id(), 'approve_service_review', 'service_review', row.id,
+              new_data={'is_approved': row.is_approved})
+    db.session.commit()
+
+    return jsonify(row.to_admin_dict()), 200
+
+
+@admin_bp.route('/service-reviews/<int:review_id>', methods=['DELETE'])
+@jwt_required()
+@admin_required
+def delete_service_review(review_id):
+    """Dismiss a review outright.
+
+    A real delete, not a flag. The customer can leave another whenever they
+    like — the row is not a record of anything that happened, it is an opinion,
+    and keeping dismissed ones forever just makes the queue harder to read.
+    """
+    from ..models import ServiceReview
+
+    row = ServiceReview.query.get_or_404(review_id)
+    log_audit(_get_admin_id(), 'delete_service_review', 'service_review', row.id,
+              old_data={'rating': row.rating, 'user_id': row.user_id})
+    db.session.delete(row)
+    db.session.commit()
+
+    return jsonify({'id': review_id, 'deleted': True}), 200
+
+
 # ── Weekly basket items ────────────────────────────────────────────────────────
 #
 # Items F2H sells inside a weekly basket, created here rather than listed by a
