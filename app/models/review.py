@@ -40,4 +40,26 @@ class Review(db.Model):
                 'full_name': self.reviewer.full_name,
                 'avatar_url': self.reviewer.avatar_url,
             } if self.reviewer else None,
+            # What was reviewed, by name.
+            #
+            # Only the ids were sent, so every client showing "my reviews" had
+            # nothing to put in the heading — the website rendered a blank line
+            # where the product should be. A review nobody can tell apart from
+            # the next one is not much of a record.
+            #
+            # One of the two is always null: a review is of a product or of a
+            # farm, never both.
+            'product': {
+                'id': self.product.id,
+                'name': self.product.name,
+                'unit': self.product.unit,
+                'primary_image': (self.product.primary_image.image_url
+                                  if self.product.primary_image else None),
+            } if self.product else None,
+            'farmer': {
+                'id': self.farmer_user.id,
+                'name': (self.farmer_user.farmer_profile.farm_name
+                         if self.farmer_user.farmer_profile
+                         else self.farmer_user.full_name),
+            } if self.farmer_user else None,
         }
