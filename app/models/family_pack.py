@@ -115,7 +115,7 @@ class FamilyPackOrder(db.Model):
     status = db.Column(
         db.Enum('pending', 'admin_review', 'accepted', 'rejected', 'chat_active',
                 'confirmed', 'preparing', 'picked_up', 'ready_for_pickup',
-                'out_for_delivery', 'completed', 'cancelled'),
+                'out_for_delivery', 'cash_collected', 'completed', 'cancelled'),
         default='pending'
     )
     # See the matching column on PurchaseRequest — it is what authorises a

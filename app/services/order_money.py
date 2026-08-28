@@ -79,10 +79,25 @@ def settle(order, new_status, label, actor_id=None):
         if payment is not None:
             payments.mark_farmer_paid(payment, actor_id)
 
+    elif new_status == 'cash_collected':
+        # The customer just paid, at the door, to the courier. This *is* the
+        # collection — recording it anywhere else would mean the one moment
+        # money changes hands is the one moment nothing is written down.
+        #
+        # `actor_id` names who took it, which under cash is the only record of
+        # that. Guarded rather than assumed: a refunded payment must not be
+        # re-collected, and `mark_collected` raises on one.
+        if payment is not None and payment.status not in ('paid', 'refunded'):
+            payments.mark_collected(payment, actor_id, note=f'{label} delivered')
+
     elif new_status == 'completed':
-        # Nothing to do. The farmer was paid at pickup; completing only means
-        # the customer has their produce and the cash is in, both of which are
-        # already recorded. This branch used to credit the farmer's wallet.
+        # Nothing to do. The farmer was paid at pickup and the customer paid the
+        # courier at the door; completing now means only that the courier has
+        # handed that cash to F2H, which `DeliveryRemittance` records on its own.
+        #
+        # Still nothing here for a pickup order either: the customer collected
+        # at the farm and paid the farmer directly, so there was never any F2H
+        # cash in the middle to settle.
         pass
 
     elif new_status == 'cancelled':

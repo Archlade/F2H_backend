@@ -4,6 +4,7 @@ from ..services.family_pack_order_service import (
     create_family_pack_order, update_family_pack_order_status,
     get_family_pack_orders_for_customer, get_family_pack_orders_for_farmer
 )
+from ..models.request import ACTIVE_FILTER, CLOSED_STATUSES
 from ..models import FamilyPackOrder
 from ..utils.helpers import paginate_response
 from ..utils.validators import clamp_page
@@ -61,7 +62,10 @@ def list_orders():
         query = FamilyPackOrder.query.filter(
             FamilyPackOrder.assigned_delivery_id == user_id)
         if status:
-            query = query.filter(FamilyPackOrder.status == status)
+            if status == ACTIVE_FILTER:
+                query = query.filter(FamilyPackOrder.status.notin_(CLOSED_STATUSES))
+            else:
+                query = query.filter(FamilyPackOrder.status == status)
         else:
             query = query.filter(
                 FamilyPackOrder.status.notin_(['completed', 'cancelled', 'rejected']))
@@ -73,7 +77,10 @@ def list_orders():
     elif role == 'admin':
         query = FamilyPackOrder.query
         if status:
-            query = query.filter(FamilyPackOrder.status == status)
+            if status == ACTIVE_FILTER:
+                query = query.filter(FamilyPackOrder.status.notin_(CLOSED_STATUSES))
+            else:
+                query = query.filter(FamilyPackOrder.status == status)
         total = query.count()
         orders = query.order_by(FamilyPackOrder.created_at.desc()).offset((page-1)*per_page).limit(per_page).all()
     else:

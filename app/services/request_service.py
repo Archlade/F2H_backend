@@ -2,6 +2,7 @@ from datetime import datetime
 from ..extensions import db
 from ..models import PurchaseRequest, RequestStatusHistory, Chat, Notification
 from ..models.product import Product
+from ..models.request import ACTIVE_FILTER, CLOSED_STATUSES
 from .notification_service import create_notification
 from . import order_money
 from . import stock_service as stock
@@ -191,7 +192,7 @@ def update_request_status(request_id: int, actor_id: int, actor_role: str, new_s
     if party is None:
         raise PermissionError('Not authorized')
 
-    if not party_may_set(party, new_status):
+    if not party_may_set(party, new_status, req.status):
         noun = {'buyer': 'buyer', 'seller': 'seller'}.get(party, actor_role)
         raise PermissionError(f"The {noun} cannot set an order to '{new_status}'")
 
@@ -285,8 +286,38 @@ def update_request_status(request_id: int, actor_id: int, actor_role: str, new_s
         socketio.emit('new_notification', {'type': 'status_update', 'request_id': req.id, 'status': new_status},
                       room=f"user_{recipient}")
 
+    # The courier has the customer's cash, and an order only closes once that
+    # money reaches F2H. Told to every admin rather than left to be noticed: the
+    # courier cannot finish this themselves by design, so if nobody records the
+    # handover the order sits at `cash_collected` indefinitely and the cash sits
+    # in a pocket.
+    if new_status == 'cash_collected':
+        _notify_admins_cash_collected(req, actor_id, 'Order')
+
     db.session.commit()
     return req
+
+
+def _notify_admins_cash_collected(order, actor_id, label):
+    """Tell every active admin that a courier is holding cash for this order."""
+    from ..models import Role, User
+
+    courier = User.query.get(actor_id)
+    who = courier.full_name if courier else 'A delivery partner'
+    admins = (User.query.join(Role, User.role_id == Role.id)
+              .filter(Role.name == 'admin', User.is_active.is_(True),
+                      User.deleted_at.is_(None))
+              .all())
+    payload = {'order_id': order.id, 'delivery_id': actor_id}
+    for admin in admins:
+        create_notification(
+            admin.id, actor_id, 'cash_collected',
+            'Cash collected — record the handover',
+            f"{who} collected {order.total_price} for {label} #{order.id}. "
+            f"The order closes when you record the handover.",
+            payload)
+        socketio.emit('new_notification', {'type': 'cash_collected', **payload},
+                      room=f"user_{admin.id}")
 
 
 def _add_status_history(request_id, from_status, to_status, changed_by, note=''):
@@ -302,7 +333,9 @@ def _add_status_history(request_id, from_status, to_status, changed_by, note='')
 
 def get_requests_for_customer(customer_id: int, status=None, page=1, per_page=20):
     query = PurchaseRequest.query.filter_by(customer_id=customer_id)
-    if status:
+    if status == ACTIVE_FILTER:
+        query = query.filter(PurchaseRequest.status.notin_(CLOSED_STATUSES))
+    elif status:
         query = query.filter(PurchaseRequest.status == status)
     query = query.order_by(PurchaseRequest.created_at.desc())
     total = query.count()
@@ -312,7 +345,9 @@ def get_requests_for_customer(customer_id: int, status=None, page=1, per_page=20
 
 def get_requests_for_farmer(farmer_id: int, status=None, page=1, per_page=20):
     query = PurchaseRequest.query.filter_by(farmer_id=farmer_id)
-    if status:
+    if status == ACTIVE_FILTER:
+        query = query.filter(PurchaseRequest.status.notin_(CLOSED_STATUSES))
+    elif status:
         query = query.filter(PurchaseRequest.status == status)
     query = query.order_by(PurchaseRequest.created_at.desc())
     total = query.count()

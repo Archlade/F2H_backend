@@ -128,7 +128,7 @@ def update_family_pack_order_status(order_id: int, actor_id: int, actor_role: st
     if party is None:
         raise PermissionError('Not authorized')
 
-    if not party_may_set(party, new_status):
+    if not party_may_set(party, new_status, order.status):
         noun = {'buyer': 'buyer', 'seller': 'seller'}.get(party, actor_role)
         raise PermissionError(f"The {noun} cannot set an order to '{new_status}'")
 
@@ -209,6 +209,13 @@ def update_family_pack_order_status(order_id: int, actor_id: int, actor_role: st
                             {'order_id': order.id})
         socketio.emit('new_notification', {'type': 'status_update', 'order_id': order.id, 'status': new_status},
                       room=f"user_{recipient}")
+
+    # Same as a one-off order: the courier is holding the customer's cash and
+    # cannot close this themselves, so every admin is told there is a handover
+    # to record. Shared helper, so the two order types cannot drift.
+    if new_status == 'cash_collected':
+        from .request_service import _notify_admins_cash_collected
+        _notify_admins_cash_collected(order, actor_id, 'Basket')
 
     db.session.commit()
     return order

@@ -11,6 +11,7 @@ from ..models.settings import (MIN_ORDER_FLOOR, MIN_ORDER_CEILING,
 from ..extensions import db, socketio
 from ..services.notification_service import create_notification
 from ..services.product_service import set_product_images, unique_slug
+from ..models.request import SETTLED_STATUSES
 from datetime import datetime
 from urllib.parse import quote
 from sqlalchemy import func
@@ -76,9 +77,9 @@ def dashboard():
 
     # total_price is already the amount charged, so discounts are accounted for.
     request_revenue = db.session.query(func.sum(PurchaseRequest.total_price)).filter(
-        PurchaseRequest.status == 'completed').scalar() or 0
+        PurchaseRequest.status.in_(SETTLED_STATUSES)).scalar() or 0
     pack_revenue = db.session.query(func.sum(FamilyPackOrder.total_price)).filter(
-        FamilyPackOrder.status == 'completed').scalar() or 0
+        FamilyPackOrder.status.in_(SETTLED_STATUSES)).scalar() or 0
 
     return jsonify({
         'total_users': total_users,
@@ -536,10 +537,10 @@ def analytics():
 
     # Both order tables, so this agrees with total_revenue on the dashboard.
     revenue = (db.session.query(func.sum(PurchaseRequest.total_price)).filter(
-        PurchaseRequest.status == 'completed',
+        PurchaseRequest.status.in_(SETTLED_STATUSES),
         PurchaseRequest.created_at >= thirty_ago
     ).scalar() or 0) + (db.session.query(func.sum(FamilyPackOrder.total_price)).filter(
-        FamilyPackOrder.status == 'completed',
+        FamilyPackOrder.status.in_(SETTLED_STATUSES),
         FamilyPackOrder.created_at >= thirty_ago
     ).scalar() or 0)
 
@@ -693,6 +694,11 @@ def list_all_orders():
             'status': r.status,
             'payment_status': r.payment_status,
             'total_price': float(r.total_price),
+            # Broken out so the delivery fee can be shown on its own rather
+            # than disappearing into the total and then into F2H's share.
+            'delivery_charge': float(getattr(r, 'delivery_charge', 0) or 0),
+            'goods_total': round(float(r.total_price)
+                                 - float(getattr(r, 'delivery_charge', 0) or 0), 2),
             'purchase_mode': r.purchase_mode,
             'created_at': r.created_at.isoformat() if r.created_at else None,
             'customer': _contact(r.customer),
@@ -715,6 +721,9 @@ def list_all_orders():
             'status': o.status,
             'payment_status': o.payment_status,
             'total_price': float(o.total_price),
+            'delivery_charge': float(getattr(o, 'delivery_charge', 0) or 0),
+            'goods_total': round(float(o.total_price)
+                                 - float(getattr(o, 'delivery_charge', 0) or 0), 2),
             'purchase_mode': o.purchase_mode,
             'created_at': o.created_at.isoformat() if o.created_at else None,
             'customer': _contact(o.customer),
@@ -1670,17 +1679,25 @@ def delivery_cash():
                 .filter(Role.name == 'delivery', User.deleted_at.is_(None))
                 .order_by(User.first_name).all())
 
+    # Cash the courier has taken: `cash_collected` as well as `completed`.
+    #
+    # `completed` alone was right when the courier closed the order at the door.
+    # It is now the admin who closes it, by recording the handover — so counting
+    # only completed orders would mean a courier's outstanding balance stayed at
+    # zero until the money was already in, and the figure an admin needs *in
+    # order to* collect it would never appear. Both states, because a completed
+    # order's cash was collected too and must not drop out of the total.
     rows = []
     for u in partners:
         requests_total = db.session.query(
             func.coalesce(func.sum(PurchaseRequest.total_price), 0)
         ).filter(PurchaseRequest.assigned_delivery_id == u.id,
-                 PurchaseRequest.status == 'completed').scalar() or 0
+                 PurchaseRequest.status.in_(SETTLED_STATUSES)).scalar() or 0
 
         baskets_total = db.session.query(
             func.coalesce(func.sum(FamilyPackOrder.total_price), 0)
         ).filter(FamilyPackOrder.assigned_delivery_id == u.id,
-                 FamilyPackOrder.status == 'completed').scalar() or 0
+                 FamilyPackOrder.status.in_(SETTLED_STATUSES)).scalar() or 0
 
         handed = db.session.query(
             func.coalesce(func.sum(DeliveryRemittance.amount), 0)
@@ -1720,6 +1737,43 @@ def list_remittances(delivery_id):
     return jsonify([r.to_dict() for r in rows]), 200
 
 
+@admin_bp.route('/delivery-cash/<int:delivery_id>/awaiting', methods=['GET'])
+@jwt_required()
+@admin_required
+def orders_awaiting_handover(delivery_id):
+    """Orders this courier has taken cash for and not yet handed over.
+
+    What the handover form is built from: tick these off and the amount is the
+    sum of them, so the cash recorded and the orders closed are the same set
+    rather than two numbers an admin has to reconcile by eye.
+
+    Both kinds, oldest first — the money held longest is the money to chase.
+    """
+    rows = []
+    for model, kind in ((PurchaseRequest, 'request'), (FamilyPackOrder, 'pack-order')):
+        for order in (model.query
+                      .filter(model.assigned_delivery_id == delivery_id,
+                              model.status == 'cash_collected')
+                      .order_by(model.created_at.asc()).all()):
+            product = getattr(order, 'product', None)
+            rows.append({
+                'kind': kind,
+                'id': order.id,
+                'title': (product.name if product else None)
+                         or (order.pack.name if getattr(order, 'pack', None) else None)
+                         or f'Basket #{order.id}',
+                'amount': float(order.total_price),
+                'customer': order.customer.full_name if order.customer else None,
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+            })
+
+    rows.sort(key=lambda r: r['created_at'] or '')
+    return jsonify({
+        'items': rows,
+        'total': round(sum(r['amount'] for r in rows), 2),
+    }), 200
+
+
 @admin_bp.route('/delivery-cash/<int:delivery_id>/remittances', methods=['POST'])
 @jwt_required()
 @admin_required
@@ -1749,20 +1803,64 @@ def record_remittance(delivery_id):
     if amount != amount or amount in (float('inf'), float('-inf')) or amount == 0:
         return jsonify({'error': 'Enter an amount other than zero'}), 400
 
+    admin_id = _get_admin_id()
+
     row = DeliveryRemittance(
         delivery_id=delivery_id,
         amount=amount,
-        received_by=_get_admin_id(),
+        received_by=admin_id,
         note=(data.get('note') or '').strip()[:255] or None,
     )
     db.session.add(row)
     db.session.flush()
 
-    log_audit(_get_admin_id(), 'record_remittance', 'delivery_remittance', row.id,
-              new_data={'delivery_id': delivery_id, 'amount': amount})
+    # The orders this handover settles.
+    #
+    # `[{"kind": "request", "id": 12}, …]` — optional, because a correcting
+    # entry covers no orders at all. Each one named must belong to this courier
+    # and be sitting at `cash_collected`; anything else is somebody else's
+    # money, an order still out, or one already closed, and is refused rather
+    # than skipped. Half a handover applied silently is worse than none.
+    settled = []
+    for ref in (data.get('orders') or []):
+        kind = (ref or {}).get('kind')
+        model = {'request': PurchaseRequest,
+                 'basket': FamilyPackOrder,
+                 'pack-order': FamilyPackOrder}.get(kind)
+        if model is None:
+            db.session.rollback()
+            return jsonify({'error': f"Unknown order kind '{kind}'"}), 400
+
+        order = model.query.get((ref or {}).get('id'))
+        if order is None or order.assigned_delivery_id != delivery_id:
+            db.session.rollback()
+            return jsonify({'error': 'That order is not assigned to this partner'}), 400
+        if order.status != 'cash_collected':
+            db.session.rollback()
+            return jsonify({
+                'error': f'Order #{order.id} is {order.status.replace("_", " ")}, '
+                         'not awaiting a handover'
+            }), 400
+
+        order.status = 'completed'
+        # Each order type keeps its own history writer; they are not
+        # interchangeable, because the two tables number their rows separately.
+        if model is PurchaseRequest:
+            from ..services.request_service import _add_status_history as _hist
+        else:
+            from ..services.family_pack_order_service import _add_status_history as _hist
+        _hist(order.id, 'cash_collected', 'completed', admin_id,
+              f'Cash handed over (remittance #{row.id})')
+        settled.append({'kind': kind, 'id': order.id})
+
+    log_audit(admin_id, 'record_remittance', 'delivery_remittance', row.id,
+              new_data={'delivery_id': delivery_id, 'amount': amount,
+                        'orders': settled})
     db.session.commit()
 
-    return jsonify(row.to_dict()), 201
+    payload = row.to_dict()
+    payload['settled_orders'] = settled
+    return jsonify(payload), 201
 
 
 # ── Push diagnostics ───────────────────────────────────────────────────────────

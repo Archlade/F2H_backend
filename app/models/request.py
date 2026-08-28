@@ -17,13 +17,29 @@ PARTY_TRANSITIONS = {
     # paying records it, not the party being paid. Leaving it to the seller
     # would let a farmer mark themselves paid for a collection that never
     # happened. `out_for_delivery` follows pickup and is equally F2H's.
-    'seller': {'accepted', 'rejected', 'chat_active', 'confirmed', 'preparing',
+    #
+    # `accepted` and `chat_active` are gone: they came from a flow where the
+    # farmer accepted and then negotiated in a chat that no longer exists, so an
+    # order passed through both without anybody doing anything. The farmer now
+    # confirms once and marks it prepared.
+    #
+    # `completed` remains theirs for the pickup lane only — a customer who
+    # collects at the farm hands their cash straight to the farmer, so there is
+    # no courier and no handover. The transition graph is what confines it to
+    # `ready_for_pickup`.
+    'seller': {'rejected', 'confirmed', 'preparing',
                'ready_for_pickup', 'completed', 'cancelled'},
-    # Two states, and neither of them is `picked_up`.
+    # Two states, and neither of them is `picked_up` or `completed`.
     #
     # A delivery account loads from the store room, carries the order
-    # (`out_for_delivery`) and takes the customer's cash (`completed`). That is
-    # the whole of the job.
+    # (`out_for_delivery`) and takes the customer's cash (`cash_collected`).
+    # That is the whole of the job.
+    #
+    # **Not `completed`.** Delivering and settling up used to be one button: the
+    # courier pressed it and the order was closed while the money was still in
+    # their pocket. An order is only finished when that cash reaches F2H, and
+    # the person holding it is not the person who should be able to declare
+    # that. Completion belongs to the admin recording the handover.
     #
     # `picked_up` is deliberately not theirs even though it sounds like it is.
     # It means F2H collecting produce *from the farm* and handing the farmer
@@ -38,10 +54,13 @@ PARTY_TRANSITIONS = {
     # cancellation there is not an order being called off, it is a write-off,
     # and that should cost a phone call to an admin rather than one tap by
     # whoever is standing at a door nobody answered.
-    'delivery': {'out_for_delivery', 'completed'},
-    'admin': {'accepted', 'rejected', 'admin_review', 'chat_active', 'confirmed',
+    'delivery': {'out_for_delivery', 'cash_collected'},
+    # `admin_review` stays admin-only and off the main route: the weekly-basket
+    # generator parks a short basket there so somebody can substitute the
+    # missing items before it goes out.
+    'admin': {'rejected', 'admin_review', 'confirmed',
               'preparing', 'picked_up', 'ready_for_pickup', 'out_for_delivery',
-              'completed', 'cancelled'},
+              'cash_collected', 'completed', 'cancelled'},
 }
 
 # The old names, so nothing that still speaks in account roles breaks.
@@ -87,8 +106,48 @@ def party_for(order, actor_id, actor_role):
     return None
 
 
-def party_may_set(party, new_status):
-    return new_status in PARTY_TRANSITIONS.get(party, set())
+# The customer has paid, whoever is still holding the cash.
+#
+# `completed` alone used to mean this, because the courier closed the order at
+# the door. Completion now waits for the handover, so a sale would drop out of
+# every revenue figure for as long as the money sat in somebody's pocket — the
+# dashboard would dip because a courier had not been in yet, which says nothing
+# about trading. Both states together preserve what `completed` used to mean.
+SETTLED_STATUSES = ('cash_collected', 'completed')
+
+# An order that is over, however it ended.
+CLOSED_STATUSES = ('completed', 'cancelled', 'rejected')
+
+# A named filter, not a status.
+#
+# Both clients ask for `?status=active_orders` on the orders screens, and the
+# list endpoint compared it to the column — which matches nothing, so those
+# pages have been showing an empty list to every farmer and every customer.
+# Naming it here makes it mean what the clients always intended: everything
+# still in progress.
+ACTIVE_FILTER = 'active_orders'
+
+
+def party_may_set(party, new_status, from_status=None):
+    """Whether this side of the order may move it to `new_status`.
+
+    `from_status` narrows one case that the party table alone cannot express.
+    A seller closes an order only on the pickup lane, where the customer
+    collected at the farm and paid them directly. On a delivery order the money
+    goes courier → admin, and `cash_collected -> completed` is the handover —
+    the farmer was paid at the gate long before and has no part in it. Without
+    this a farmer could close a delivery order whose cash never reached F2H,
+    and the courier's outstanding balance would silently drop.
+
+    Callers that do not pass `from_status` get the old, looser behaviour, which
+    is safe for everything except that one pair.
+    """
+    if new_status not in PARTY_TRANSITIONS.get(party, set()):
+        return False
+    if (new_status == 'completed' and party == 'seller'
+            and from_status is not None and from_status != 'ready_for_pickup'):
+        return False
+    return True
 
 
 # How far a buyer can get before their order stops being theirs to call off.
@@ -139,28 +198,33 @@ def role_may_set(actor_role, new_status):
 # now where the farmer gets paid — so that shortcut was a way to deliver an
 # order the farmer was never paid for.
 VALID_TRANSITIONS = {
-    'pending': ['accepted', 'rejected', 'cancelled', 'admin_review'],
-    # `confirmed` is reachable from here for weekly baskets held short of stock:
-    # an admin substitutes the missing items and sends the basket on its way.
-    # Routing that through accepted → chat_active → confirmed would be three
-    # clicks and a chat thread to fix a missing bunch of spinach.
-    'admin_review': ['accepted', 'confirmed', 'rejected', 'cancelled'],
-    # `confirmed` is reachable directly now that there is no chat.
-    #
-    # The flow used to be accepted -> chat_active -> confirmed, where
-    # `chat_active` meant "the two of them are discussing it". With the chat
-    # feature removed nothing moves an order into that state, so leaving this as
-    # `['chat_active', 'cancelled']` would strand every accepted order with no
-    # way forward. `chat_active` itself is kept as a valid state so orders
-    # already sitting in it can still be confirmed.
-    'accepted': ['chat_active', 'confirmed', 'cancelled'],
-    'rejected': [],
+    'pending': ['confirmed', 'rejected', 'cancelled', 'admin_review'],
+    # Weekly baskets held short of stock: an admin substitutes the missing items
+    # and sends the basket on its way, or calls it off.
+    'admin_review': ['confirmed', 'rejected', 'cancelled'],
+    # Retired. Kept as keys with a way forward so that anything still sitting in
+    # one — a row the migration missed, a client posting an old value — can be
+    # confirmed rather than stranded. Nothing enters them any more: no party may
+    # set either, and no state leads to them.
+    'accepted': ['confirmed', 'cancelled'],
     'chat_active': ['confirmed', 'cancelled'],
+    'rejected': [],
     'confirmed': ['preparing', 'cancelled'],
     'preparing': ['picked_up', 'ready_for_pickup', 'cancelled'],
     'picked_up': ['out_for_delivery', 'cancelled'],
+    # The customer collects at the farm and pays the farmer directly. No
+    # courier, no cash to hand over, so it finishes in one step.
     'ready_for_pickup': ['completed', 'cancelled'],
-    'out_for_delivery': ['completed', 'cancelled'],
+    # Delivered and paid for — but the money is in the courier's pocket, not
+    # F2H's. `completed` is no longer reachable from here.
+    'out_for_delivery': ['cash_collected', 'cancelled'],
+    # Only a handover finishes it. An admin records the cash and these close
+    # together; see `record_remittance`.
+    #
+    # Still cancellable, because a delivery can be written off after the fact —
+    # a customer who paid and then returned everything, say — and that has to
+    # be recordable without inventing a state for it.
+    'cash_collected': ['completed', 'cancelled'],
     'completed': [],
     'cancelled': [],
 }
@@ -191,7 +255,7 @@ class PurchaseRequest(db.Model):
     status = db.Column(
         db.Enum('pending', 'admin_review', 'accepted', 'rejected', 'chat_active',
                 'confirmed', 'preparing', 'picked_up', 'ready_for_pickup',
-                'out_for_delivery', 'completed', 'cancelled'),
+                'out_for_delivery', 'cash_collected', 'completed', 'cancelled'),
         default='pending'
     )
     # Which delivery account is carrying this order, or NULL for unassigned.
