@@ -2,7 +2,7 @@ from datetime import datetime
 from ..extensions import db
 from ..models import PurchaseRequest, RequestStatusHistory, Chat, Notification
 from ..models.product import Product
-from ..models.request import ACTIVE_FILTER, CLOSED_STATUSES
+from ..models.request import ACTIVE_FILTER, PAST_FILTER, CLOSED_STATUSES
 from .notification_service import create_notification
 from . import order_money
 from . import stock_service as stock
@@ -335,6 +335,8 @@ def get_requests_for_customer(customer_id: int, status=None, page=1, per_page=20
     query = PurchaseRequest.query.filter_by(customer_id=customer_id)
     if status == ACTIVE_FILTER:
         query = query.filter(PurchaseRequest.status.notin_(CLOSED_STATUSES))
+    elif status == PAST_FILTER:
+        query = query.filter(PurchaseRequest.status.in_(CLOSED_STATUSES))
     elif status:
         query = query.filter(PurchaseRequest.status == status)
     query = query.order_by(PurchaseRequest.created_at.desc())
@@ -347,6 +349,8 @@ def get_requests_for_farmer(farmer_id: int, status=None, page=1, per_page=20):
     query = PurchaseRequest.query.filter_by(farmer_id=farmer_id)
     if status == ACTIVE_FILTER:
         query = query.filter(PurchaseRequest.status.notin_(CLOSED_STATUSES))
+    elif status == PAST_FILTER:
+        query = query.filter(PurchaseRequest.status.in_(CLOSED_STATUSES))
     elif status:
         query = query.filter(PurchaseRequest.status == status)
     query = query.order_by(PurchaseRequest.created_at.desc())

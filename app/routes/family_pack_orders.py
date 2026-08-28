@@ -1,14 +1,19 @@
+import logging
+
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from ..services.family_pack_order_service import (
     create_family_pack_order, update_family_pack_order_status,
     get_family_pack_orders_for_customer, get_family_pack_orders_for_farmer
 )
-from ..models.request import ACTIVE_FILTER, CLOSED_STATUSES
+from ..models.request import ACTIVE_FILTER, PAST_FILTER, CLOSED_STATUSES
 from ..models import FamilyPackOrder
 from ..utils.helpers import paginate_response
 from ..utils.validators import clamp_page
 from ..utils.decorators import current_user_role
+from ..extensions import db
+
+logger = logging.getLogger(__name__)
 
 family_pack_orders_bp = Blueprint('family_pack_orders', __name__)
 
@@ -64,6 +69,8 @@ def list_orders():
         if status:
             if status == ACTIVE_FILTER:
                 query = query.filter(FamilyPackOrder.status.notin_(CLOSED_STATUSES))
+            elif status == PAST_FILTER:
+                query = query.filter(FamilyPackOrder.status.in_(CLOSED_STATUSES))
             else:
                 query = query.filter(FamilyPackOrder.status == status)
         else:
@@ -79,6 +86,8 @@ def list_orders():
         if status:
             if status == ACTIVE_FILTER:
                 query = query.filter(FamilyPackOrder.status.notin_(CLOSED_STATUSES))
+            elif status == PAST_FILTER:
+                query = query.filter(FamilyPackOrder.status.in_(CLOSED_STATUSES))
             else:
                 query = query.filter(FamilyPackOrder.status == status)
         total = query.count()
@@ -127,5 +136,12 @@ def update_status(order_id):
         return jsonify({'error': str(e)}), 403
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    except Exception as e:
+    except Exception:
+        # See the note on the same handler in requests.py: returning the bare
+        # string and discarding the exception meant a courier saw "Server error"
+        # and the log showed nothing at all.
+        db.session.rollback()
+        logger.exception(
+            'Basket status change failed: order=%s actor=%s role=%s -> %s',
+            order_id, user_id, role, new_status)
         return jsonify({'error': 'Server error'}), 500

@@ -127,6 +127,14 @@ CLOSED_STATUSES = ('completed', 'cancelled', 'rejected')
 # still in progress.
 ACTIVE_FILTER = 'active_orders'
 
+# The other half of the same pair: everything that is over.
+#
+# Without this the only way to show a customer their purchase history was to
+# fetch every order they had ever placed and drop the active ones on the client,
+# which pages wrongly — page one of "all orders" can be entirely active, leaving
+# a history section that looks empty until you scroll a list you cannot see.
+PAST_FILTER = 'past_orders'
+
 
 def party_may_set(party, new_status, from_status=None):
     """Whether this side of the order may move it to `new_status`.

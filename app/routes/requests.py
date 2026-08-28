@@ -1,3 +1,5 @@
+import logging
+
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from ..services.request_service import (
@@ -9,6 +11,9 @@ from ..utils.helpers import paginate_response
 from flask_jwt_extended import get_jwt
 from ..utils.validators import clamp_page
 from ..utils.decorators import current_user_role
+from ..extensions import db
+
+logger = logging.getLogger(__name__)
 
 requests_bp = Blueprint('requests', __name__)
 
@@ -148,6 +153,18 @@ def update_status(request_id):
     except PermissionError as e:
         return jsonify({'error': str(e)}), 403
     except ValueError as e:
+        # `PaymentError` subclasses ValueError, so a refused collection — an
+        # already-refunded payment, say — lands here and the courier is told
+        # what actually happened rather than "Server error".
         return jsonify({'error': str(e)}), 400
-    except Exception as e:
+    except Exception:
+        # Logged with the traceback, and with the two facts needed to find the
+        # row again. This used to return the bare string and throw the exception
+        # away — so a failure here produced "Server error" on the phone and
+        # *nothing at all* in the log, which is unarguably the worst possible
+        # combination: the one person who could fix it is told least.
+        db.session.rollback()
+        logger.exception(
+            'Status change failed: request=%s actor=%s role=%s -> %s',
+            request_id, user_id, role, new_status)
         return jsonify({'error': 'Server error'}), 500

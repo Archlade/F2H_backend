@@ -1,6 +1,7 @@
 from datetime import datetime
 from ..extensions import db, socketio
 from ..models import FamilyPack, FamilyPackOrder, RequestStatusHistory, Chat, Product
+from ..models.request import ACTIVE_FILTER, PAST_FILTER, CLOSED_STATUSES
 from .notification_service import create_notification
 from . import order_money
 from . import stock_service as stock
@@ -202,13 +203,25 @@ def update_family_pack_order_status(order_id: int, actor_id: int, actor_role: st
         socketio.emit('new_notification', {'type': 'request_rejected', 'order_id': order.id},
                       room=f"user_{order.customer_id}")
     else:
-        recipient = order.customer_id if actor_id == order.farmer_id else order.farmer_id
-        create_notification(recipient, actor_id, 'status_update',
-                            'Family Pack Order Status Updated',
-                            f"Your order status changed to {new_status.replace('_', ' ').title()}",
-                            {'order_id': order.id})
-        socketio.emit('new_notification', {'type': 'status_update', 'order_id': order.id, 'status': new_status},
-                      room=f"user_{recipient}")
+        # Tell the other side, falling back to the customer when there is no
+        # farmer to tell.
+        #
+        # Defensive rather than a fix for a live crash: `FamilyPackOrder`
+        # requires a farmer today, so the fallback does not fire. But
+        # `FamilyPack` and `FamilyPackSubscription` both allow a null farmer —
+        # that is how an F2H-sourced basket is modelled — and if the generator
+        # ever carries that through to an order, the unguarded version would
+        # pass `recipient_id=None` into a NOT NULL column and commit would raise
+        # an IntegrityError that surfaces as a bare 500 on the courier's phone.
+        recipient = (order.customer_id if actor_id == order.farmer_id
+                     else (order.farmer_id or order.customer_id))
+        if recipient is not None and recipient != actor_id:
+            create_notification(recipient, actor_id, 'status_update',
+                                'Family Pack Order Status Updated',
+                                f"Your order status changed to {new_status.replace('_', ' ').title()}",
+                                {'order_id': order.id})
+            socketio.emit('new_notification', {'type': 'status_update', 'order_id': order.id, 'status': new_status},
+                          room=f"user_{recipient}")
 
     # Same as a one-off order: the courier is holding the customer's cash and
     # cannot close this themselves, so every admin is told there is a handover
@@ -234,7 +247,14 @@ def _add_status_history(order_id, from_status, to_status, changed_by, note=''):
 
 def get_family_pack_orders_for_customer(customer_id: int, status=None, page=1, per_page=20):
     query = FamilyPackOrder.query.filter_by(customer_id=customer_id)
-    if status:
+    # `active_orders` and `past_orders` are named filters, not statuses. Compared
+    # to the column they match nothing, which is how the orders screens came to
+    # show an empty list to everyone — see ACTIVE_FILTER in models/request.py.
+    if status == ACTIVE_FILTER:
+        query = query.filter(FamilyPackOrder.status.notin_(CLOSED_STATUSES))
+    elif status == PAST_FILTER:
+        query = query.filter(FamilyPackOrder.status.in_(CLOSED_STATUSES))
+    elif status:
         query = query.filter(FamilyPackOrder.status == status)
     query = query.order_by(FamilyPackOrder.created_at.desc())
     total = query.count()
