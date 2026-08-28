@@ -34,6 +34,27 @@ payments_bp = Blueprint('payments', __name__)
 COLLECTABLE_STATUSES = ('out_for_delivery', 'ready_for_pickup', 'completed')
 
 
+def is_collectable(order):
+    """Whether there is money to take from the customer on this order yet.
+
+    `ready_for_pickup` is in the list above but means two different things
+    depending on who is collecting, and only one of them involves the customer:
+
+        pickup    the customer is at the farm with cash in hand — collectable
+        delivery  the goods are still at the farm waiting for F2H — not
+
+    Both lanes pass through that status now that the farmer marks every order
+    ready before F2H takes it. Without this split a farmer could mark a delivery
+    order paid while it sat in their own shed, and the customer would be told
+    they had settled an order nobody had yet delivered to them.
+    """
+    if order.status not in COLLECTABLE_STATUSES:
+        return False
+    if order.status == 'ready_for_pickup':
+        return getattr(order, 'purchase_mode', 'delivery') == 'pickup'
+    return True
+
+
 def _load_order(order_type, order_id, lock=False):
     """The order, optionally locked for the rest of the transaction.
 
@@ -104,7 +125,7 @@ def payment_status(order_type, order_id):
         'payments_available': True,
         'can_collect': (_may_collect(user, role, order)
                         and order.payment_status == 'pending'
-                        and order.status in COLLECTABLE_STATUSES),
+                        and is_collectable(order)),
     }), 200
 
 
@@ -151,7 +172,7 @@ def collect():
         # the order exists but is not theirs is more than they need to know.
         return jsonify({'error': 'You cannot record payment for this order'}), 403
 
-    if order.status not in COLLECTABLE_STATUSES:
+    if not is_collectable(order):
         return jsonify({'error': 'This order has not reached the customer yet, '
                                  'so there is nothing to collect.'}), 400
 

@@ -1,6 +1,6 @@
 from ..extensions import db
 from datetime import datetime
-from .request import VALID_TRANSITIONS
+from .request import allowed_next
 
 class FamilyPack(db.Model):
     __tablename__ = 'family_packs'
@@ -160,7 +160,10 @@ class FamilyPackOrder(db.Model):
                                      order_by='RequestStatusHistory.created_at')
 
     def can_transition_to(self, new_status):
-        return new_status in VALID_TRANSITIONS.get(self.status, [])
+        # Same route as a single-product order, same lane split. A basket is
+        # normally delivered, but `purchase_mode` is a real column on this table
+        # too and a customer may collect one, so it is read rather than assumed.
+        return new_status in allowed_next(self.status, self.purchase_mode)
 
     def to_dict(self, include_pack=True, include_users=True):
         data = {

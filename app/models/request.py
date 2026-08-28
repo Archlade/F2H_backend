@@ -210,11 +210,24 @@ VALID_TRANSITIONS = {
     'chat_active': ['confirmed', 'cancelled'],
     'rejected': [],
     'confirmed': ['preparing', 'cancelled'],
-    'preparing': ['picked_up', 'ready_for_pickup', 'cancelled'],
+    # One way out, and it belongs to the farmer.
+    #
+    # `picked_up` used to be reachable straight from here, which let an admin
+    # collect an order the farmer had never said was ready. The farmer packs the
+    # goods, so the farmer is the one who knows when there is something to
+    # collect — every order now passes through their hands before F2H takes it.
+    'preparing': ['ready_for_pickup', 'cancelled'],
+    # "The goods are ready." What happens next depends on who is coming for
+    # them, which is `purchase_mode` — see `allowed_next` below:
+    #
+    #   delivery → `picked_up`, an admin collects and pays the farmer
+    #   pickup   → `completed`, the customer collects and pays the farmer direct
+    #
+    # Both are listed because the table is shared; `allowed_next` narrows it to
+    # the one lane that applies, so a delivery order cannot be closed out at the
+    # farm and a farm-pickup order cannot be handed to a courier.
+    'ready_for_pickup': ['picked_up', 'completed', 'cancelled'],
     'picked_up': ['out_for_delivery', 'cancelled'],
-    # The customer collects at the farm and pays the farmer directly. No
-    # courier, no cash to hand over, so it finishes in one step.
-    'ready_for_pickup': ['completed', 'cancelled'],
     # Delivered and paid for — but the money is in the courier's pocket, not
     # F2H's. `completed` is no longer reachable from here.
     'out_for_delivery': ['cash_collected', 'cancelled'],
@@ -228,6 +241,32 @@ VALID_TRANSITIONS = {
     'completed': [],
     'cancelled': [],
 }
+
+
+def allowed_next(status, purchase_mode=None):
+    """The statuses `status` may move to, for an order bought this way.
+
+    `VALID_TRANSITIONS` is the shape of the route; this is the route an
+    individual order actually has. They differ in one place — `ready_for_pickup`
+    means "ready" for both lanes but leads somewhere different in each:
+
+        delivery  ready_for_pickup → picked_up   (F2H collects, farmer paid)
+        pickup    ready_for_pickup → completed   (customer collects, pays farmer)
+
+    Listing both in the table and narrowing here, rather than keeping two
+    tables, because everything before and after this point is identical and two
+    tables would drift. Splitting on the order's own `purchase_mode` also means
+    the rule cannot be got wrong by a caller: there is no argument to pass.
+
+    `purchase_mode=None` returns the unnarrowed list, which is what a caller
+    with no order in hand — a client rendering a legend, a test walking the
+    graph — actually wants.
+    """
+    nexts = VALID_TRANSITIONS.get(status, [])
+    if status != 'ready_for_pickup' or purchase_mode is None:
+        return nexts
+    blocked = 'completed' if purchase_mode == 'delivery' else 'picked_up'
+    return [s for s in nexts if s != blocked]
 
 
 class PurchaseRequest(db.Model):
@@ -301,7 +340,7 @@ class PurchaseRequest(db.Model):
     chat = db.relationship('Chat', back_populates='request', uselist=False)
 
     def can_transition_to(self, new_status):
-        return new_status in VALID_TRANSITIONS.get(self.status, [])
+        return new_status in allowed_next(self.status, self.purchase_mode)
 
     def to_dict(self, include_product=True, include_users=True):
         data = {
