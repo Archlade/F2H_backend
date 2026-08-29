@@ -318,6 +318,37 @@ def set_subscription_status(subscription_id: int, actor_id: int, actor_role: str
 
 # ── weekly delivery generation ─────────────────────────────────────────────
 
+# Where a freshly generated basket starts on the order route.
+#
+# Short of stock → `admin_review`, unchanged: somebody substitutes items
+# before it goes anywhere.
+#
+# Otherwise it depends on who packed it, because the states between
+# `confirmed` and `picked_up` exist to move goods from a farm to F2H and to
+# pay the farmer at the gate:
+#
+#   F2H-sourced   `picked_up`   the basket is assembled in our own store
+#                               room. There is no farm to collect from and
+#                               no cash to hand over — the platform account
+#                               is both seller and collector — so those
+#                               steps would be an admin walking F2H's own
+#                               basket through three farmer stages every
+#                               week before any courier could move.
+#
+#   farm-supplied `confirmed`   a real farm fills it, so it runs the normal
+#                               route. `picked_up` is where that farmer is
+#                               paid, and skipping it would quietly stop
+#                               paying them.
+#
+# `sub.farmer_id` rather than the resolved `seller_id`: the latter falls back
+# to the platform account, so testing it would call every basket F2H-sourced
+# and skip the payout on the legacy single-farm ones too.
+def _generated_status(hold_reason, subscription_farmer_id):
+    if hold_reason:
+        return 'admin_review'
+    return 'confirmed' if subscription_farmer_id is not None else 'picked_up'
+
+
 def _create_delivery(sub, delivery_date):
     """One confirmed delivery. Returns None if it already exists."""
     subtotal = sub.weekly_total
@@ -333,6 +364,7 @@ def _create_delivery(sub, delivery_date):
         coupon_id = sub.coupon_id
 
     total = round(subtotal - discount, 2)
+
 
     # Who sells this week's basket.
     #
@@ -392,7 +424,7 @@ def _create_delivery(sub, delivery_date):
         purchase_mode='delivery',
         # Approved once at the subscription, so ordinary weeks skip straight
         # past the accept/chat stages. A short week waits for an admin instead.
-        status='admin_review' if hold_reason else 'confirmed',
+        status=_generated_status(hold_reason, sub.farmer_id),
         hold_reason=hold_reason,
         delivery_address_id=sub.delivery_address_id,
         # Inherited, so a standing weekly round arrives already allocated
